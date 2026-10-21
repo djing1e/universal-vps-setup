@@ -1,0 +1,10 @@
+*.log
+*.bak
+*.backup
+*.env
+.env
+*.key
+*.pem
+*.tar.gz
+*.zip
+.DS_Store
