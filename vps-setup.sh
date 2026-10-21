@@ -1733,9 +1733,60 @@ except (ValueError,AssertionError,TypeError,AttributeError):
 ' 
 }
 
+# Debian 12 Bookworm does not ship dnscrypt-proxy in its regular APT repositories.
+# Use a pinned upstream release with GitHub-published SHA256, without mixing suites.
+_nextdns_bookworm_binary() {
+    local version=2.1.19 arch asset sha archive tmp_bin base url
+    arch="$(dpkg --print-architecture)" || return 1
+    case "$arch" in
+        amd64)
+            asset=linux_x86_64
+            sha=2b7e156b48bb194911f5ae65727f6dc04b375f085528620d3e5300d11d345c33
+            ;;
+        arm64)
+            asset=linux_arm64
+            sha=3af0c0164bef6844cf3becd5b8f47a849f7b83cd367ec9b0e5538a4d16ba7fcc
+            ;;
+        *)
+            echo "Debian 12: неподдерживаемая архитектура $arch" >&2
+            return 1
+            ;;
+    esac
+    base="dnscrypt-proxy-${asset}-${version}.tar.gz"
+    url="https://github.com/DNSCrypt/dnscrypt-proxy/releases/download/${version}/${base}"
+    archive="$(mktemp)" || return 1
+    tmp_bin="$(mktemp)" || { rm -f "$archive"; return 1; }
+    echo "Debian 12: скачиваю проверенный dnscrypt-proxy $version ($arch)"
+    if ! curl -fL --retry 2 --connect-timeout 10 --max-time 90 "$url" -o "$archive" ||
+       ! printf '%s  %s\n' "$sha" "$archive" | sha256sum -c --status ||
+       ! tar -xOzf "$archive" "linux-${asset#linux_}/dnscrypt-proxy" > "$tmp_bin" ||
+       ! test -s "$tmp_bin"; then
+        echo 'ОШИБКА: загрузка или SHA256-проверка dnscrypt-proxy не пройдена' >&2
+        rm -f "$archive" "$tmp_bin"
+        return 1
+    fi
+    install -d -m 0755 /usr/local/libexec/nextdns-doh || {
+        rm -f "$archive" "$tmp_bin"; return 1;
+    }
+    if ! install -m 0755 "$tmp_bin" /usr/local/libexec/nextdns-doh/dnscrypt-proxy; then
+        rm -f "$archive" "$tmp_bin"
+        return 1
+    fi
+    rm -f "$archive" "$tmp_bin"
+    if ! id _dnscrypt-proxy >/dev/null 2>&1; then
+        adduser --system --group --no-create-home _dnscrypt-proxy || return 1
+    fi
+}
+
 _nextdns_doh_prepare() {
-    local profile="$1" stamp ip i successes selected=() candidates
-    if ! apt-get install -y --no-remove dnscrypt-proxy python3 dnsutils curl; then
+    local profile="$1" stamp ip i successes selected=() candidates dnscrypt_bin=/usr/sbin/dnscrypt-proxy
+    if (. /etc/os-release; [ "$ID" = debian ] && [ "$VERSION_ID" = 12 ]); then
+        if ! apt-get install -y --no-remove python3 dnsutils curl ca-certificates ||
+           ! _nextdns_bookworm_binary; then
+            echo 'Ошибка установки DoH-зависимостей Debian 12'; return 1
+        fi
+        dnscrypt_bin=/usr/local/libexec/nextdns-doh/dnscrypt-proxy
+    elif ! apt-get install -y --no-remove dnscrypt-proxy python3 dnsutils curl; then
         echo 'Ошибка установки DoH-зависимостей'; return 1
     fi
     # Try NextDNS documented anycast IPs first, then previously verified
@@ -1788,7 +1839,7 @@ EOF_DOH
             printf "  [static.'nextdns-%s']\n  stamp = '%s'\n" "$i" "$stamp"
         done
     } > /etc/nextdns-doh/dnscrypt-proxy.toml || return 1
-    cat > /etc/systemd/system/nextdns-doh.service <<'EOF_UNIT'
+    cat > /etc/systemd/system/nextdns-doh.service <<EOF_UNIT
 [Unit]
 Description=NextDNS DoH via dnscrypt-proxy
 After=network-online.target
@@ -1796,7 +1847,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=_dnscrypt-proxy
-ExecStart=/usr/sbin/dnscrypt-proxy -config /etc/nextdns-doh/dnscrypt-proxy.toml
+ExecStart=$dnscrypt_bin -config /etc/nextdns-doh/dnscrypt-proxy.toml
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=yes
