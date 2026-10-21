@@ -697,7 +697,8 @@ do_ssh_setup() {
 
     sed -i "s/^#*Port .*/Port ${SSH_PORT}/" "$SSHD_CONFIG"
     grep -q "^Port" "$SSHD_CONFIG" || echo "Port ${SSH_PORT}" >> "$SSHD_CONFIG"
-    sed -i 's/^#*PasswordAuthentication .*/PasswordAuthentication no/' "$SSHD_CONFIG"    sed -i 's/^#*PubkeyAuthentication .*/PubkeyAuthentication yes/' "$SSHD_CONFIG"
+    sed -i 's/^#*PasswordAuthentication .*/PasswordAuthentication no/' "$SSHD_CONFIG"
+    sed -i 's/^#*PubkeyAuthentication .*/PubkeyAuthentication yes/' "$SSHD_CONFIG"
     sed -i 's/^#*PermitRootLogin .*/PermitRootLogin prohibit-password/' "$SSHD_CONFIG"
     sed -i 's/^#*X11Forwarding .*/X11Forwarding no/' "$SSHD_CONFIG"
     sed -i 's/^#*MaxAuthTries .*/MaxAuthTries 5/' "$SSHD_CONFIG"
@@ -1396,7 +1397,8 @@ EOF
         return 1
     fi
 
-    if (( 10#$credentials_source_port < 1 || 10#$credentials_source_port > 65535 )); then        echo "ОШИБКА: порт локального API вне диапазона 1–65535."
+    if (( 10#$credentials_source_port < 1 || 10#$credentials_source_port > 65535 )); then
+        echo "ОШИБКА: порт локального API вне диапазона 1–65535."
         return 1
     fi
 
@@ -2095,7 +2097,8 @@ _nextdns_apply() {
         cat > "$tmp" <<EOF_DOT
 # NextDNS managed: profile=$profile protocol=dot
 [Resolve]
-DNS=DNS=45.90.28.0#${profile}.dns.nextdns.io 45.90.30.0#${profile}.dns.nextdns.io
+DNS=
+DNS=45.90.28.0#${profile}.dns.nextdns.io 45.90.30.0#${profile}.dns.nextdns.io
 DNSOverTLS=yes
 Domains=~.
 FallbackDNS=
@@ -2794,7 +2797,8 @@ for cc in "${COUNTRIES[@]}"; do
         done < "$LOCAL"
     fi
 
-    # Источник 2: RIPE NCC    if [ $COUNT -eq 0 ]; then
+    # Источник 2: RIPE NCC
+    if [ $COUNT -eq 0 ]; then
         DATA=$(curl -sf --max-time 25 \
             "https://stat.ripe.net/data/country-resource-list/data.json?resource=${cc^^}" | \
             python3 -c "
@@ -3493,7 +3497,8 @@ http://{\$SELF_STEAL_DOMAIN} {
 }
 
 https://{\$SELF_STEAL_DOMAIN} {
-    bind unix/{\$CADDY_SOCKET_PATH}    root * /var/www/html
+    bind unix/{\$CADDY_SOCKET_PATH}
+    root * /var/www/html
     try_files {path} /index.html
     file_server
     encode gzip
@@ -4192,7 +4197,8 @@ rn_install_edge_stub() {
     font-size: 12px;
   }
   .header-status {
-    font-size: 11px;    color: var(--text-faint);
+    font-size: 11px;
+    color: var(--text-faint);
     letter-spacing: 0.04em;
   }
 
@@ -4891,7 +4897,8 @@ setup_remnanode_egames() {
 }
 
 setup_remnanode_classic() {
-    print_header    echo "╔══════════════════════════════════════════════╗"
+    print_header
+    echo "╔══════════════════════════════════════════════╗"
     echo "║   remnanode — классическая установка        ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
@@ -5590,7 +5597,8 @@ tbs_show() {
     done
 }
 
-tbs_status() {    print_header
+tbs_status() {
+    print_header
     local role; role=$(tbs_role)
     echo "  Роль: ${role:-не установлен}"
     [ -z "$role" ] && return
@@ -6289,7 +6297,8 @@ fetch() {
         "https://raw.githubusercontent.com/C24Be/AS_Network_List/main/$p" 2>/dev/null \
         && [ -s "$tmp" ]; then
         mv -f "$tmp" "$out"; return 0
-    fi    rm -f "$tmp"
+    fi
+    rm -f "$tmp"
     return 1
 }
 
@@ -6988,7 +6997,8 @@ net.ipv4.tcp_rmem                 = 4096 87380 $sock_max
 net.ipv4.tcp_wmem                 = 4096 65536 $sock_max
 net.ipv4.tcp_notsent_lowat        = 131072
 net.ipv4.ip_local_port_range      = 10000 65535
-net.ipv4.udp_rmem_min             = 16384net.ipv4.udp_wmem_min             = 16384
+net.ipv4.udp_rmem_min             = 16384
+net.ipv4.udp_wmem_min             = 16384
 
 # форвардинг (нужно прокси-нодам / WARP / bridge)
 net.ipv4.ip_forward               = 1
@@ -7688,6 +7698,7 @@ NFT
         return
     fi
     rn_success "nft -c: синтаксис валиден"
+
     # ── сейфти-таймер от самоблокировки ──
     if command -v systemd-run >/dev/null 2>&1; then
         systemctl stop vpsguard-safety.timer 2>/dev/null || true
@@ -8386,7 +8397,8 @@ setup_one_button() {
     onebtn_step "База: автообновления" do_autoupgrade
     onebtn_step "База: fail2ban" do_fail2ban
 
-    # ── Шаг 2: CrowdSec (без TG) ──    onebtn_step "CrowdSec (поведенческий IPS)" crowdsec_install
+    # ── Шаг 2: CrowdSec (без TG) ──
+    onebtn_step "CrowdSec (поведенческий IPS)" crowdsec_install
 
     # ── Шаг 3: AS_Network_List (РФ-госсети → INPUT) ──
     onebtn_step "AS_Network_List (РФ-госсети)" asb_install_iptables
@@ -8791,3 +8803,4 @@ while true; do
     echo ""
     read -e -p "Нажмите Enter для возврата в меню..."
 done
+
