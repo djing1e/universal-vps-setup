@@ -1,19 +1,19 @@
 # Universal VPS Setup
 
-Интерактивный установщик и администрирование VPS (Debian 13 / Ubuntu 24.04).
+Интерактивный установщик VPS для Debian 13 / Ubuntu 24.04.
 
-## Запуск (приватный репозиторий)
+**Файл установщика:** [vps-setup.sh](./vps-setup.sh)
 
-На VPS должен быть настроен SSH Deploy Key **только для чтения** с доступом к этому репозиторию и установлен git.
+## Запуск с приватного GitHub
+
+Запускать от `root`. Для загрузки требуется GitHub Fine-grained Personal Access Token с правом **Contents: Read-only** только к этому репозиторию.
 
 ```bash
-clear; bash -c 'set -e; d=$(mktemp -d); trap '\''rm -rf "$d"'\'' EXIT; git clone --depth 1 git@github.com:djing1e/universal-vps-setup.git "$d/repo"; bash "$d/repo/vps-setup.sh"'
+TOKEN='ВСТАВЬ_СВОЙ_ТОКЕН'; F=$(mktemp /tmp/vps-setup.XXXXXX.sh) && curl -fsSL -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github.raw+json" "https://api.github.com/repos/djing1e/universal-vps-setup/contents/vps-setup.sh" -o "$F" && unset TOKEN && bash -n "$F" && bash "$F"; R=$?; unset TOKEN; [ -n "${F:-}" ] && rm -f "$F"; (exit "$R")
 ```
 
-Запускайте от `root`; команда загружает актуальную версию из `main`.
-
-**Осторожно:** скрипт изменяет DNS, SSH, firewall и сетевые сервисы. Перед запуском на удалённом VPS сохраните доступ через консоль провайдера. Проверяйте изменения перед выполнением с правами root.
+**Безопасность:** токен, вставленный в команду, может сохраниться в истории shell. Не публикуйте его в репозитории и не передавайте третьим лицам. Перед запуском с правами root проверяйте изменения установщика и сохраняйте консольный доступ у провайдера.
 
 ## Разработка
 
-Правки в отдельных ветках с Pull Request. Проверка синтаксиса: `bash -n vps-setup.sh`.
+Доработки — через ветки и Pull Request. В `main` находится рабочая версия.
