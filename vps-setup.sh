@@ -1865,6 +1865,12 @@ _nextdns_network_dropin_path() {
 
 _nextdns_network_enable() {
     local path dir state=/var/lib/vps-nextdns tmp
+    # ifupdown/NetworkManager hosts have no networkd .network file to modify.
+    # Never restart networking or rewrite interfaces on a remote VPS.
+    if ! systemctl is-active --quiet systemd-networkd; then
+        echo 'NextDNS: systemd-networkd не активен; сетевые интерфейсы не изменяются'
+        return 0
+    fi
     path="$(_nextdns_network_dropin_path)" || {
         echo 'Не найден networkd-интерфейс; DNS не изменён'; return 1;
     }
@@ -1897,6 +1903,10 @@ EOF_NEXTDNS_NET
 
 _nextdns_network_restore() {
     local state=/var/lib/vps-nextdns path
+    if ! systemctl is-active --quiet systemd-networkd; then
+        echo 'NextDNS: networkd не активен, сетевой интерфейс оставлен без изменений'
+        return 0
+    fi
     if [ -f "$state/network-path" ]; then
         path="$(cat "$state/network-path")"
     else
@@ -1918,6 +1928,11 @@ _nextdns_network_restore() {
 # Snapshot and restore the managed networkd drop-in and state atomically.
 _nextdns_network_snapshot() {
     local dir="$1" path
+    if ! systemctl is-active --quiet systemd-networkd; then
+        # Marker ensures rollback never invokes networkctl on ifupdown systems.
+        : > "$dir/no-networkd" || return 1
+        return 0
+    fi
     path="$(_nextdns_network_dropin_path)" || return 1
     printf '%s\n' "$path" > "$dir/path" || return 1
     if [ -f "$path" ]; then cp -a "$path" "$dir/dropin" || return 1; fi
@@ -1927,6 +1942,9 @@ _nextdns_network_snapshot() {
 }
 _nextdns_network_snapshot_restore() {
     local dir="$1" path tmp reload_rc=0
+    if [ -f "$dir/no-networkd" ]; then
+        return 0
+    fi
     path="$(cat "$dir/path")" || return 1
     case "$path" in /etc/systemd/network/*.network.d/90-nextdns.conf) ;; *) return 1 ;; esac
     # Restore files even if networkctl is unavailable; never discard the snapshot
