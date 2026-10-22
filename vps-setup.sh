@@ -202,8 +202,17 @@ fetch() { curl -fsSL --retry 2 --connect-timeout 10 --max-time 120 "$1" -o "$2";
 
 if [[ $MODE == as ]]; then
     BASE=https://raw.githubusercontent.com/C24Be/AS_Network_List/main/blacklists_iptables
-    fetch "$BASE/blacklist-v4.ipset" "$WORK/source4"
-    fetch "$BASE/blacklist-v6.ipset" "$WORK/source6"
+    for version in 4 6; do
+        path="blacklists_iptables/blacklist-v${version}.ipset"
+        if fetch "$BASE/blacklist-v${version}.ipset" "$WORK/source${version}"; then
+            log "AS IPv${version} source: github-raw"
+        elif fetch "https://cdn.jsdelivr.net/gh/C24Be/AS_Network_List@main/$path" "$WORK/source${version}"; then
+            log "AS IPv${version} source: jsdelivr"
+        else
+            log "ERROR: AS IPv${version} download failed from both sources"
+            exit 1
+        fi
+    done
     python3 - "$WORK" <<'PY'
 import ipaddress, pathlib, sys
 p=pathlib.Path(sys.argv[1])
@@ -457,29 +466,25 @@ enable_managed_blocklist_timer() {
 
 vps_fetch_github() {
     local user="$1" repo="$2" branch="$3" path="$4" out="$5"
-    local tmp="${out}.tmp.$$"
-    local rc=1
-
-    # 1. jsDelivr (стабильно работает в РФ, может кэшировать до 12ч — для daily-листов норм)
-    local url_jsd="https://cdn.jsdelivr.net/gh/${user}/${repo}@${branch}/${path}"
-    if curl -fsSL --connect-timeout 5 --max-time 30 -o "$tmp" "$url_jsd" 2>/dev/null; then
-        if [ -s "$tmp" ]; then
-            mv -f "$tmp" "$out"
-            return 0
-        fi
-    fi
-    rm -f "$tmp"
-
-    # 2. Прямой raw.githubusercontent.com (на хостингах вне РФ работает)
+    local tmp="${out}.tmp.$$" url label
     local url_raw="https://raw.githubusercontent.com/${user}/${repo}/${branch}/${path}"
-    if curl -fsSL --connect-timeout 5 --max-time 30 -o "$tmp" "$url_raw" 2>/dev/null; then
-        if [ -s "$tmp" ]; then
-            mv -f "$tmp" "$out"
+    local url_jsd="https://cdn.jsdelivr.net/gh/${user}/${repo}@${branch}/${path}"
+
+    # First prefer fresh GitHub Raw (currently reachable on some RU hosts);
+    # fall back to jsDelivr when GitHub Raw is unavailable.
+    # Never overwrite an existing list on a failed/empty download.
+    for label in raw jsdelivr; do
+        if [ "$label" = raw ]; then url="$url_raw"; else url="$url_jsd"; fi
+        rm -f -- "$tmp"
+        if curl -4 -fsSL --retry 1 --connect-timeout 5 --max-time 30             -o "$tmp" "$url" && [ -s "$tmp" ]; then
+            mv -f -- "$tmp" "$out" || return 1
+            echo "✓ GitHub download ($label): ${repo}/${path}"
             return 0
         fi
-    fi
-    rm -f "$tmp"
-
+        echo "WARN: GitHub download failed ($label): ${repo}/${path}" >&2
+    done
+    rm -f -- "$tmp"
+    echo "ERROR: both GitHub Raw and jsDelivr unavailable: ${repo}/${path}" >&2
     return 1
 }
 
