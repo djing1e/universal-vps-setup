@@ -1109,170 +1109,9 @@ crowdsec_install() {
     local cs_key_file="/etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg"
     local cs_expected_fp="6A89E3C2303A901A889971D3376ED5326E93CD0C"
 
-    # Prefer distribution-signed Debian packages when both are available.
-    # Debian's bouncer package name differs from CrowdSec's packagecloud name.
     local cs_bouncer_pkg="crowdsec-firewall-bouncer-iptables"
     local cs_package_source="crowdsec-upstream"
     if apt-cache policy crowdsec | grep -Eq 'Candidate: [^ (]+
-
-        echo "Подключение официального APT-репозитория CrowdSec..."
-
-        if ! apt-get install -y --no-remove ca-certificates curl gnupg; then
-            echo "ОШИБКА: не удалось установить зависимости репозитория."
-            return 1
-        fi
-
-        install -d -m 0755 /etc/apt/keyrings
-
-        local cs_tmp_key
-        cs_tmp_key="$(mktemp)" || return 1
-
-        if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 45 \
-            -o "$cs_tmp_key" \
-            "https://packagecloud.io/crowdsec/crowdsec/gpgkey"; then
-            rm -f "$cs_tmp_key"
-            echo "ОШИБКА: не удалось скачать ключ CrowdSec."
-            return 1
-        fi
-
-        local cs_actual_fp
-        cs_actual_fp="$(gpg --batch --show-keys --with-colons "$cs_tmp_key" 2>/dev/null |
-            awk -F: '$1 == "fpr" {print $10; exit}')"
-
-        if [ "$cs_actual_fp" != "$cs_expected_fp" ]; then
-            rm -f "$cs_tmp_key"
-            echo "ОШИБКА: fingerprint ключа CrowdSec не совпадает!"
-            return 1
-        fi
-
-        if ! gpg --batch --yes --dearmor \
-            -o "$cs_key_file" "$cs_tmp_key"; then
-            rm -f "$cs_tmp_key"
-            echo "ОШИБКА: не удалось установить ключ CrowdSec."
-            return 1
-        fi
-        rm -f "$cs_tmp_key"
-        chmod 0644 "$cs_key_file"
-
-        printf '%s\n' \
-            "deb [signed-by=$cs_key_file] https://packagecloud.io/crowdsec/crowdsec/any/ any main" \
-            > "$cs_repo_file"
-
-        if ! apt-get update; then
-            echo "ОШИБКА: обновление APT после добавления CrowdSec."
-            return 1
-        fi
-    fi
-
- &&
-       apt-cache policy crowdsec-firewall-bouncer | grep -Eq 'Candidate: [^ (]+
-
-        echo "Подключение официального APT-репозитория CrowdSec..."
-
-        if ! apt-get install -y --no-remove ca-certificates curl gnupg; then
-            echo "ОШИБКА: не удалось установить зависимости репозитория."
-            return 1
-        fi
-
-        install -d -m 0755 /etc/apt/keyrings
-
-        local cs_tmp_key
-        cs_tmp_key="$(mktemp)" || return 1
-
-        if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 45 \
-            -o "$cs_tmp_key" \
-            "https://packagecloud.io/crowdsec/crowdsec/gpgkey"; then
-            rm -f "$cs_tmp_key"
-            echo "ОШИБКА: не удалось скачать ключ CrowdSec."
-            return 1
-        fi
-
-        local cs_actual_fp
-        cs_actual_fp="$(gpg --batch --show-keys --with-colons "$cs_tmp_key" 2>/dev/null |
-            awk -F: '$1 == "fpr" {print $10; exit}')"
-
-        if [ "$cs_actual_fp" != "$cs_expected_fp" ]; then
-            rm -f "$cs_tmp_key"
-            echo "ОШИБКА: fingerprint ключа CrowdSec не совпадает!"
-            return 1
-        fi
-
-        if ! gpg --batch --yes --dearmor \
-            -o "$cs_key_file" "$cs_tmp_key"; then
-            rm -f "$cs_tmp_key"
-            echo "ОШИБКА: не удалось установить ключ CrowdSec."
-            return 1
-        fi
-        rm -f "$cs_tmp_key"
-        chmod 0644 "$cs_key_file"
-
-        printf '%s\n' \
-            "deb [signed-by=$cs_key_file] https://packagecloud.io/crowdsec/crowdsec/any/ any main" \
-            > "$cs_repo_file"
-
-        if ! apt-get update; then
-            echo "ОШИБКА: обновление APT после добавления CrowdSec."
-            return 1
-        fi
-    fi
-
-; then
-        cs_bouncer_pkg="crowdsec-firewall-bouncer"
-        cs_package_source="debian"
-        echo "✓ CrowdSec + Firewall Bouncer доступны из системных зеркал APT."
-    elif ! apt-cache policy "$cs_bouncer_pkg" |
-        grep -Eq 'Candidate: [^ (]+
-
-        echo "Подключение официального APT-репозитория CrowdSec..."
-
-        if ! apt-get install -y --no-remove ca-certificates curl gnupg; then
-            echo "ОШИБКА: не удалось установить зависимости репозитория."
-            return 1
-        fi
-
-        install -d -m 0755 /etc/apt/keyrings
-
-        local cs_tmp_key
-        cs_tmp_key="$(mktemp)" || return 1
-
-        if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 45 \
-            -o "$cs_tmp_key" \
-            "https://packagecloud.io/crowdsec/crowdsec/gpgkey"; then
-            rm -f "$cs_tmp_key"
-            echo "ОШИБКА: не удалось скачать ключ CrowdSec."
-            return 1
-        fi
-
-        local cs_actual_fp
-        cs_actual_fp="$(gpg --batch --show-keys --with-colons "$cs_tmp_key" 2>/dev/null |
-            awk -F: '$1 == "fpr" {print $10; exit}')"
-
-        if [ "$cs_actual_fp" != "$cs_expected_fp" ]; then
-            rm -f "$cs_tmp_key"
-            echo "ОШИБКА: fingerprint ключа CrowdSec не совпадает!"
-            return 1
-        fi
-
-        if ! gpg --batch --yes --dearmor \
-            -o "$cs_key_file" "$cs_tmp_key"; then
-            rm -f "$cs_tmp_key"
-            echo "ОШИБКА: не удалось установить ключ CrowdSec."
-            return 1
-        fi
-        rm -f "$cs_tmp_key"
-        chmod 0644 "$cs_key_file"
-
-        printf '%s\n' \
-            "deb [signed-by=$cs_key_file] https://packagecloud.io/crowdsec/crowdsec/any/ any main" \
-            > "$cs_repo_file"
-
-        if ! apt-get update; then
-            echo "ОШИБКА: обновление APT после добавления CrowdSec."
-            return 1
-        fi
-    fi
-
-; then
 
         echo "Подключение официального APT-репозитория CrowdSec..."
 
@@ -1612,8 +1451,8 @@ EOF
         return 1
     fi
 
-    # Both Debian and upstream packages can register via postinst.
-    # Do not regenerate a working bouncer key, even across re-runs.
+    # Пакет Bouncer самостоятельно регистрируется через postinst.
+    # Не создаём вторую регистрацию и не перевыпускаем API-ключ.
     local bouncer_config="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
     local bouncer_id_file="${bouncer_config}.id"
     if [ ! -f "$bouncer_config" ]; then
@@ -1654,6 +1493,1281 @@ EOF
     fi
 
     log "Используем API-ключ, созданный пакетом Bouncer ($cs_package_source)."
+    echo "=== [6/7] Запуск установленного Bouncer ==="
+    if ! systemctl enable crowdsec-firewall-bouncer; then
+        echo "ОШИБКА: не удалось включить Firewall Bouncer."
+        return 1
+    fi
+
+    if ! systemctl restart crowdsec-firewall-bouncer; then
+        echo "ОШИБКА: не удалось запустить Firewall Bouncer."
+        journalctl -u crowdsec-firewall-bouncer -n 30 --no-pager
+        return 1
+    fi
+
+    sleep 3
+
+    if ! systemctl is-active --quiet crowdsec-firewall-bouncer; then
+        echo "ОШИБКА: Bouncer не запустился!"
+        journalctl -u crowdsec-firewall-bouncer -n 20 --no-pager
+        return 1
+    fi
+
+    echo "=== [7/7] Проверка существующего firewall ==="
+
+    # Не сбрасываем, не включаем и не перезапускаем UFW.
+    # Не перезаписываем общие файлы iptables/ipset.
+    if command -v ufw >/dev/null 2>&1; then
+        ufw status
+    else
+        echo "UFW не установлен — состояние firewall не изменяем."
+    fi
+
+    echo ""
+    echo "========================================="
+    echo "=== CrowdSec установлен ==="
+    echo "========================================="
+    echo "LAPI порт: ${LAPI_PORT}"
+    echo ""
+    cscli bouncers list
+    echo ""
+    echo "Мониторинг: cscli decisions list"
+    echo "Метрики:    cscli metrics"
+}
+ &&
+       apt-cache policy crowdsec-firewall-bouncer | grep -Eq 'Candidate: [^ (]+
+
+        echo "Подключение официального APT-репозитория CrowdSec..."
+
+        if ! apt-get install -y --no-remove ca-certificates curl gnupg; then
+            echo "ОШИБКА: не удалось установить зависимости репозитория."
+            return 1
+        fi
+
+        install -d -m 0755 /etc/apt/keyrings
+
+        local cs_tmp_key
+        cs_tmp_key="$(mktemp)" || return 1
+
+        if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 45 \
+            -o "$cs_tmp_key" \
+            "https://packagecloud.io/crowdsec/crowdsec/gpgkey"; then
+            rm -f "$cs_tmp_key"
+            echo "ОШИБКА: не удалось скачать ключ CrowdSec."
+            return 1
+        fi
+
+        local cs_actual_fp
+        cs_actual_fp="$(gpg --batch --show-keys --with-colons "$cs_tmp_key" 2>/dev/null |
+            awk -F: '$1 == "fpr" {print $10; exit}')"
+
+        if [ "$cs_actual_fp" != "$cs_expected_fp" ]; then
+            rm -f "$cs_tmp_key"
+            echo "ОШИБКА: fingerprint ключа CrowdSec не совпадает!"
+            return 1
+        fi
+
+        if ! gpg --batch --yes --dearmor \
+            -o "$cs_key_file" "$cs_tmp_key"; then
+            rm -f "$cs_tmp_key"
+            echo "ОШИБКА: не удалось установить ключ CrowdSec."
+            return 1
+        fi
+        rm -f "$cs_tmp_key"
+        chmod 0644 "$cs_key_file"
+
+        printf '%s\n' \
+            "deb [signed-by=$cs_key_file] https://packagecloud.io/crowdsec/crowdsec/any/ any main" \
+            > "$cs_repo_file"
+
+        if ! apt-get update; then
+            echo "ОШИБКА: обновление APT после добавления CrowdSec."
+            return 1
+        fi
+    fi
+
+    # ── PREFLIGHT: пакеты APT и доступность CrowdSec Hub ──
+    # Удалённый установочный скрипт не используется.
+    # Существующий firewall не изменяем.
+    local cs_package
+    for cs_package in crowdsec crowdsec-firewall-bouncer-iptables; do
+        if ! apt-cache policy "$cs_package" |
+            grep -Eq 'Candidate: [^ (]+$'; then
+            echo "ОШИБКА: пакет $cs_package недоступен через APT."
+            return 1
+        fi
+    done
+
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "ОШИБКА: curl отсутствует (установите curl до запуска)."
+        return 1
+    fi
+    if ! dpkg-query -W -f='${Status}' crowdsec 2>/dev/null | grep -Fq 'install ok installed' &&
+       ! curl -fsSL --connect-timeout 6 --max-time 15 \
+        -o /dev/null https://hub.crowdsec.net/; then
+        echo "ОШИБКА: CrowdSec Hub недоступен."
+        echo "Установка остановлена до изменения пакетов."
+        return 2
+    fi
+
+    echo "✓ Пакеты CrowdSec доступны в APT, CrowdSec Hub отвечает."
+
+    # CrowdSec работает совместно с существующим firewall.
+    # Не устанавливаем iptables-persistent и не изменяем UFW.
+    # Пакеты устанавливаются без разрешения удалять существующие.
+    if ! apt-get install -y --no-remove curl; then
+        echo "ОШИБКА: не удалось установить curl без удаления пакетов."
+        return 1
+    fi
+
+    if ! apt-get install -y --no-remove crowdsec; then
+        echo "ОШИБКА: установка CrowdSec требует удаления других пакетов или завершилась ошибкой."
+        return 1
+    fi
+    sleep 3
+
+    if [ ! -f /etc/crowdsec/config.yaml ]; then
+        echo "ОШИБКА: config.yaml не создался!"
+        return 1
+    fi
+    echo "✓ CrowdSec установлен."
+
+    echo "=== [2/7] Установка коллекций ==="
+    # Базовые коллекции обязательны для работы защиты SSH/Linux.
+    local collection
+    for collection in crowdsecurity/linux crowdsecurity/sshd; do
+        if cscli collections inspect "$collection" >/dev/null 2>&1; then
+            echo "✓ Коллекция уже установлена: $collection"
+            continue
+        fi
+
+        echo "Установка обязательной коллекции: $collection"
+        if ! timeout 60 cscli collections install "$collection"; then
+            echo "ОШИБКА: не удалось установить $collection"
+            return 1
+        fi
+    done
+
+    # Дополнительные коллекции не должны скрывать ошибки.
+    for collection in \
+        crowdsecurity/iptables \
+        crowdsecurity/base-http-scenarios \
+        crowdsecurity/whitelist-good-actors; do
+        if cscli collections inspect "$collection" >/dev/null 2>&1; then
+            echo "✓ Дополнительная коллекция уже установлена: $collection"
+            continue
+        fi
+        echo "Установка дополнительной коллекции: $collection"
+        if ! timeout 60 cscli collections install "$collection"; then
+            echo "ПРЕДУПРЕЖДЕНИЕ: коллекция $collection не установлена."
+        fi
+    done
+
+    echo "=== [3/7] Docker acquisition (проверка) ==="
+    # Не подключаем произвольные контейнеры как syslog.
+    # Для Docker нужны подходящие парсеры и явный выбор контейнеров.
+    # Существующие acquisition-файлы не изменяем.
+    echo "Docker-логи автоматически не подключаются."
+
+    echo "=== [3/7] SSH journald acquisition ==="
+
+    # Не дублируем существующие SSH acquisition.
+    # На Debian 13 sshd-session пишет в journald.
+    local ssh_acquisition_found=0
+    local acquisition_file
+
+    for acquisition_file in /etc/crowdsec/acquis.yaml /etc/crowdsec/acquis.d/*.yaml; do
+        [ -f "$acquisition_file" ] || continue
+
+        # Проверяем активные строки конфигурации, а не комментарии.
+        if grep -Eq '^[[:space:]]*source:[[:space:]]*journalctl([[:space:]]|$)' "$acquisition_file" &&
+           grep -Eq '^[[:space:]]*-[[:space:]]*"?(_SYSTEMD_UNIT=ssh\.service|SYSLOG_IDENTIFIER=sshd-session)' "$acquisition_file"; then
+            echo "Обнаружен SSH acquisition через journald: $acquisition_file"
+            ssh_acquisition_found=1
+            break
+        fi
+
+        if [ -f /var/log/auth.log ] &&
+           grep -Eq '^[[:space:]]*-[[:space:]]*/var/log/auth\.log([[:space:]]|$)' "$acquisition_file"; then
+            echo "Обнаружен SSH acquisition через auth.log: $acquisition_file"
+            ssh_acquisition_found=1
+            break
+        fi
+    done
+
+    if (( ssh_acquisition_found == 0 )); then
+        mkdir -p /etc/crowdsec/acquis.d || return 1
+
+        cat > /etc/crowdsec/acquis.d/sshd-journald.yaml <<'EOF'
+source: journalctl
+journalctl_filter:
+  - "_SYSTEMD_UNIT=ssh.service"
+labels:
+  type: syslog
+EOF
+
+        echo "✓ Добавлен SSH acquisition через journald."
+    else
+        echo "Существующий SSH acquisition сохраняем без изменений."
+    fi
+
+    echo "=== [3/7] Проверка SSH-парсера Debian 13 ==="
+
+    local ssh_success_parser="/etc/crowdsec/parsers/s01-parse/sshd-success-logs.yaml"
+
+    if [ ! -f "$ssh_success_parser" ]; then
+        echo "ОШИБКА: SSH success parser отсутствует."
+        return 1
+    fi
+
+    if grep -Eq "^filter:.*sshd-session" "$ssh_success_parser"; then
+        echo "✓ SSH parser поддерживает sshd-session."
+    elif grep -Fxq "filter: \"evt.Parsed.program == 'sshd'\"" "$ssh_success_parser"; then
+        cp -a "$ssh_success_parser" "${ssh_success_parser}.pre-debian13" || return 1
+
+        if ! sed -i \
+            "s|^filter:.*|filter: \"evt.Parsed.program in ['sshd', 'sshd-session']\"|" \
+            "$ssh_success_parser"; then
+            echo "ОШИБКА: не удалось обновить SSH parser."
+            return 1
+        fi
+
+        echo "✓ Добавлена поддержка sshd-session."
+    else
+        echo "ОШИБКА: неизвестный формат SSH success parser."
+        return 1
+    fi
+
+    if ! crowdsec -t; then
+        echo "ОШИБКА: проверка конфигурации CrowdSec не пройдена."
+        return 1
+    fi
+
+    echo "=== [4/7] Настройка порта LAPI ==="
+
+    local lapi_listen_count
+    lapi_listen_count=$(grep -Ec '^[[:space:]]*listen_uri:' /etc/crowdsec/config.yaml) || true
+
+    if [[ "$lapi_listen_count" != "1" ]]; then
+        echo "ОШИБКА: ожидался ровно один listen_uri в /etc/crowdsec/config.yaml; найдено: $lapi_listen_count"
+        return 1
+    fi
+
+    local existing_lapi
+    existing_lapi=$(sed -nE \
+        's/^[[:space:]]*listen_uri:[[:space:]]*(127\.0\.0\.1|localhost|0\.0\.0\.0):([0-9]+).*$/\2/p' \
+        /etc/crowdsec/config.yaml | head -n 1)
+
+    if (( crowdsec_config_existed == 1 )); then
+        if [[ ! "$existing_lapi" =~ ^[0-9]+$ ]] ||
+           (( 10#$existing_lapi < 1 || 10#$existing_lapi > 65535 )); then
+            echo "ОШИБКА: существующий LAPI-порт не распознан."
+            return 1
+        fi
+
+        LAPI_PORT="$existing_lapi"
+        if grep -Eq '^[[:space:]]*listen_uri:[[:space:]]*0\.0\.0\.0:' /etc/crowdsec/config.yaml; then
+            echo "ОШИБКА: существующий LAPI слушает 0.0.0.0; проверьте вручную."
+            return 1
+        fi
+        log "Сохраняем существующий LAPI-порт: $LAPI_PORT"
+    else
+        if ! LAPI_PORT=$(find_free_port); then
+            echo "ОШИБКА: не удалось выбрать LAPI-порт."
+            return 1
+        fi
+
+        if [[ ! "$existing_lapi" =~ ^[0-9]+$ ]]; then
+            echo "ОШИБКА: исходный listen_uri не распознан."
+            return 1
+        fi
+
+        if ! sed -i -E \
+            "s|^([[:space:]]*)listen_uri:[[:space:]]*.*|\1listen_uri: 127.0.0.1:${LAPI_PORT}|" \
+            /etc/crowdsec/config.yaml; then
+            echo "ОШИБКА: не удалось изменить listen_uri."
+            return 1
+        fi
+
+        if ! grep -Eq "^[[:space:]]*listen_uri:[[:space:]]*127\.0\.0\.1:${LAPI_PORT}([[:space:]]|$)" /etc/crowdsec/config.yaml; then
+            echo "ОШИБКА: LAPI listen_uri не установлен корректно."
+            return 1
+        fi
+        log "Выбран LAPI-порт: $LAPI_PORT"
+    fi
+
+    if [ ! -f /etc/crowdsec/local_api_credentials.yaml ]; then
+        echo "ОШИБКА: local_api_credentials.yaml отсутствует."
+        return 1
+    fi
+
+    # Update only the URL field; preserve machine login and password.
+    local credentials_file="/etc/crowdsec/local_api_credentials.yaml"
+    local credentials_url_count
+
+    credentials_url_count=$(grep -Ec '^[[:space:]]*url:' "$credentials_file") || true
+
+    if [[ "$credentials_url_count" != "1" ]]; then
+        echo "ОШИБКА: ожидался ровно один url в credentials; найдено: $credentials_url_count"
+        return 1
+    fi
+
+    if ! grep -Eq '^[[:space:]]*url:[[:space:]]*http://(127\.0\.0\.1|localhost):[0-9]+/?[[:space:]]*$' "$credentials_file"; then
+        echo "ОШИБКА: URL локального API имеет неожиданный формат."
+        return 1
+    fi
+
+    local credentials_source_port
+    credentials_source_port=$(sed -nE \
+        's#^[[:space:]]*url:[[:space:]]*http://(127\.0\.0\.1|localhost):([0-9]+)/?[[:space:]]*$#\2#p' \
+        "$credentials_file")
+
+    if [[ ! "$credentials_source_port" =~ ^[0-9]{1,5}$ ]]; then
+        echo "ОШИБКА: некорректный формат порта локального API."
+        return 1
+    fi
+
+    if (( 10#$credentials_source_port < 1 || 10#$credentials_source_port > 65535 )); then
+        echo "ОШИБКА: порт локального API вне диапазона 1–65535."
+        return 1
+    fi
+
+    if ! sed -i -E \
+        "s#^([[:space:]]*url:[[:space:]]*)http://[^[:space:]]+#\1http://127.0.0.1:${LAPI_PORT}#" \
+        "$credentials_file"; then
+        echo "ОШИБКА: не удалось обновить URL локального API."
+        return 1
+    fi
+
+    if ! grep -Eq "^[[:space:]]*url:[[:space:]]*http://127\.0\.0\.1:${LAPI_PORT}[[:space:]]*$" "$credentials_file"; then
+        echo "ОШИБКА: URL локального API не установлен корректно."
+        return 1
+    fi
+
+    echo "Порт LAPI: ${LAPI_PORT}"
+
+    echo "=== [5/7] Запуск CrowdSec ==="
+    if ! systemctl enable crowdsec; then
+        echo "ОШИБКА: не удалось включить CrowdSec."
+        return 1
+    fi
+
+    if ! systemctl restart crowdsec; then
+        echo "ОШИБКА: не удалось запустить CrowdSec."
+        journalctl -u crowdsec -n 30 --no-pager
+        return 1
+    fi
+
+    sleep 5
+
+    if ! systemctl is-active --quiet crowdsec; then
+        echo "ОШИБКА: CrowdSec не запустился!"
+        journalctl -u crowdsec -n 20 --no-pager
+        return 1
+    fi
+
+    echo "=== [6/7] Установка Firewall Bouncer ==="
+
+    # LAPI уже настроен, CrowdSec запущен.
+    # postinst пакета самостоятельно создаёт регистрацию и API-ключ.
+    if ! apt-get install -y --no-remove crowdsec-firewall-bouncer-iptables ipset; then
+        echo "ОШИБКА: установка Firewall Bouncer завершилась неудачно."
+        return 1
+    fi
+
+    # Пакет Bouncer самостоятельно регистрируется через postinst.
+    # Не создаём вторую регистрацию и не перевыпускаем API-ключ.
+    local bouncer_config="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
+    local bouncer_id_file="${bouncer_config}.id"
+    if [ ! -f "$bouncer_config" ]; then
+        echo "ОШИБКА: конфигурация Firewall Bouncer отсутствует."
+        return 1
+    fi
+
+    # Проверяем наличие ключа, не выводя секрет в терминал.
+    if ! awk '
+        /^[[:space:]]*api_key:[[:space:]]*/ {
+            sub(/^[[:space:]]*api_key:[[:space:]]*/, "")
+            gsub(/^[[:space:]"]+|[[:space:]"]+$/, "")
+            if ($0 != "" && $0 != "<API_KEY>" && $0 != "$API_KEY") valid=1
+        }
+        END {exit !valid}
+    ' "$bouncer_config"; then
+        echo "ОШИБКА: API-ключ Bouncer отсутствует или содержит заглушку."
+        return 1
+    fi
+
+    if [ ! -s "$bouncer_id_file" ]; then
+        echo "ПРЕДУПРЕЖДЕНИЕ: файл идентификатора Bouncer отсутствует."
+        echo "Существующую регистрацию и API-ключ сохраняем."
+    fi
+
+    # Изменяем только адрес локального API.
+    # Без обратных ссылок sed: так исключаем ошибки экранирования.
+    if ! sed -i -E \
+        "s|^[[:space:]]*api_url:[[:space:]]*.*|api_url: http://127.0.0.1:${LAPI_PORT}/|" \
+        "$bouncer_config"; then
+        echo "ОШИБКА: не удалось настроить адрес LAPI для Bouncer."
+        return 1
+    fi
+
+    if ! grep -Fxq "api_url: http://127.0.0.1:${LAPI_PORT}/" "$bouncer_config"; then
+        echo "ОШИБКА: адрес LAPI не записан в конфигурацию Bouncer."
+        return 1
+    fi
+
+    log "Используем API-ключ, созданный пакетом Bouncer."
+    echo "=== [6/7] Запуск установленного Bouncer ==="
+    if ! systemctl enable crowdsec-firewall-bouncer; then
+        echo "ОШИБКА: не удалось включить Firewall Bouncer."
+        return 1
+    fi
+
+    if ! systemctl restart crowdsec-firewall-bouncer; then
+        echo "ОШИБКА: не удалось запустить Firewall Bouncer."
+        journalctl -u crowdsec-firewall-bouncer -n 30 --no-pager
+        return 1
+    fi
+
+    sleep 3
+
+    if ! systemctl is-active --quiet crowdsec-firewall-bouncer; then
+        echo "ОШИБКА: Bouncer не запустился!"
+        journalctl -u crowdsec-firewall-bouncer -n 20 --no-pager
+        return 1
+    fi
+
+    echo "=== [7/7] Проверка существующего firewall ==="
+
+    # Не сбрасываем, не включаем и не перезапускаем UFW.
+    # Не перезаписываем общие файлы iptables/ipset.
+    if command -v ufw >/dev/null 2>&1; then
+        ufw status
+    else
+        echo "UFW не установлен — состояние firewall не изменяем."
+    fi
+
+    echo ""
+    echo "========================================="
+    echo "=== CrowdSec установлен ==="
+    echo "========================================="
+    echo "LAPI порт: ${LAPI_PORT}"
+    echo ""
+    cscli bouncers list
+    echo ""
+    echo "Мониторинг: cscli decisions list"
+    echo "Метрики:    cscli metrics"
+}
+; then
+        cs_bouncer_pkg="crowdsec-firewall-bouncer"
+        cs_package_source="debian"
+        echo "✓ CrowdSec + Firewall Bouncer доступны из системных зеркал APT."
+    elif ! apt-cache policy "$cs_bouncer_pkg" |
+        grep -Eq 'Candidate: [^ (]+
+
+        echo "Подключение официального APT-репозитория CrowdSec..."
+
+        if ! apt-get install -y --no-remove ca-certificates curl gnupg; then
+            echo "ОШИБКА: не удалось установить зависимости репозитория."
+            return 1
+        fi
+
+        install -d -m 0755 /etc/apt/keyrings
+
+        local cs_tmp_key
+        cs_tmp_key="$(mktemp)" || return 1
+
+        if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 45 \
+            -o "$cs_tmp_key" \
+            "https://packagecloud.io/crowdsec/crowdsec/gpgkey"; then
+            rm -f "$cs_tmp_key"
+            echo "ОШИБКА: не удалось скачать ключ CrowdSec."
+            return 1
+        fi
+
+        local cs_actual_fp
+        cs_actual_fp="$(gpg --batch --show-keys --with-colons "$cs_tmp_key" 2>/dev/null |
+            awk -F: '$1 == "fpr" {print $10; exit}')"
+
+        if [ "$cs_actual_fp" != "$cs_expected_fp" ]; then
+            rm -f "$cs_tmp_key"
+            echo "ОШИБКА: fingerprint ключа CrowdSec не совпадает!"
+            return 1
+        fi
+
+        if ! gpg --batch --yes --dearmor \
+            -o "$cs_key_file" "$cs_tmp_key"; then
+            rm -f "$cs_tmp_key"
+            echo "ОШИБКА: не удалось установить ключ CrowdSec."
+            return 1
+        fi
+        rm -f "$cs_tmp_key"
+        chmod 0644 "$cs_key_file"
+
+        printf '%s\n' \
+            "deb [signed-by=$cs_key_file] https://packagecloud.io/crowdsec/crowdsec/any/ any main" \
+            > "$cs_repo_file"
+
+        if ! apt-get update; then
+            echo "ОШИБКА: обновление APT после добавления CrowdSec."
+            return 1
+        fi
+    fi
+
+    # ── PREFLIGHT: пакеты APT и доступность CrowdSec Hub ──
+    # Удалённый установочный скрипт не используется.
+    # Существующий firewall не изменяем.
+    local cs_package
+    for cs_package in crowdsec crowdsec-firewall-bouncer-iptables; do
+        if ! apt-cache policy "$cs_package" |
+            grep -Eq 'Candidate: [^ (]+$'; then
+            echo "ОШИБКА: пакет $cs_package недоступен через APT."
+            return 1
+        fi
+    done
+
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "ОШИБКА: curl отсутствует (установите curl до запуска)."
+        return 1
+    fi
+    if ! dpkg-query -W -f='${Status}' crowdsec 2>/dev/null | grep -Fq 'install ok installed' &&
+       ! curl -fsSL --connect-timeout 6 --max-time 15 \
+        -o /dev/null https://hub.crowdsec.net/; then
+        echo "ОШИБКА: CrowdSec Hub недоступен."
+        echo "Установка остановлена до изменения пакетов."
+        return 2
+    fi
+
+    echo "✓ Пакеты CrowdSec доступны в APT, CrowdSec Hub отвечает."
+
+    # CrowdSec работает совместно с существующим firewall.
+    # Не устанавливаем iptables-persistent и не изменяем UFW.
+    # Пакеты устанавливаются без разрешения удалять существующие.
+    if ! apt-get install -y --no-remove curl; then
+        echo "ОШИБКА: не удалось установить curl без удаления пакетов."
+        return 1
+    fi
+
+    if ! apt-get install -y --no-remove crowdsec; then
+        echo "ОШИБКА: установка CrowdSec требует удаления других пакетов или завершилась ошибкой."
+        return 1
+    fi
+    sleep 3
+
+    if [ ! -f /etc/crowdsec/config.yaml ]; then
+        echo "ОШИБКА: config.yaml не создался!"
+        return 1
+    fi
+    echo "✓ CrowdSec установлен."
+
+    echo "=== [2/7] Установка коллекций ==="
+    # Базовые коллекции обязательны для работы защиты SSH/Linux.
+    local collection
+    for collection in crowdsecurity/linux crowdsecurity/sshd; do
+        if cscli collections inspect "$collection" >/dev/null 2>&1; then
+            echo "✓ Коллекция уже установлена: $collection"
+            continue
+        fi
+
+        echo "Установка обязательной коллекции: $collection"
+        if ! timeout 60 cscli collections install "$collection"; then
+            echo "ОШИБКА: не удалось установить $collection"
+            return 1
+        fi
+    done
+
+    # Дополнительные коллекции не должны скрывать ошибки.
+    for collection in \
+        crowdsecurity/iptables \
+        crowdsecurity/base-http-scenarios \
+        crowdsecurity/whitelist-good-actors; do
+        if cscli collections inspect "$collection" >/dev/null 2>&1; then
+            echo "✓ Дополнительная коллекция уже установлена: $collection"
+            continue
+        fi
+        echo "Установка дополнительной коллекции: $collection"
+        if ! timeout 60 cscli collections install "$collection"; then
+            echo "ПРЕДУПРЕЖДЕНИЕ: коллекция $collection не установлена."
+        fi
+    done
+
+    echo "=== [3/7] Docker acquisition (проверка) ==="
+    # Не подключаем произвольные контейнеры как syslog.
+    # Для Docker нужны подходящие парсеры и явный выбор контейнеров.
+    # Существующие acquisition-файлы не изменяем.
+    echo "Docker-логи автоматически не подключаются."
+
+    echo "=== [3/7] SSH journald acquisition ==="
+
+    # Не дублируем существующие SSH acquisition.
+    # На Debian 13 sshd-session пишет в journald.
+    local ssh_acquisition_found=0
+    local acquisition_file
+
+    for acquisition_file in /etc/crowdsec/acquis.yaml /etc/crowdsec/acquis.d/*.yaml; do
+        [ -f "$acquisition_file" ] || continue
+
+        # Проверяем активные строки конфигурации, а не комментарии.
+        if grep -Eq '^[[:space:]]*source:[[:space:]]*journalctl([[:space:]]|$)' "$acquisition_file" &&
+           grep -Eq '^[[:space:]]*-[[:space:]]*"?(_SYSTEMD_UNIT=ssh\.service|SYSLOG_IDENTIFIER=sshd-session)' "$acquisition_file"; then
+            echo "Обнаружен SSH acquisition через journald: $acquisition_file"
+            ssh_acquisition_found=1
+            break
+        fi
+
+        if [ -f /var/log/auth.log ] &&
+           grep -Eq '^[[:space:]]*-[[:space:]]*/var/log/auth\.log([[:space:]]|$)' "$acquisition_file"; then
+            echo "Обнаружен SSH acquisition через auth.log: $acquisition_file"
+            ssh_acquisition_found=1
+            break
+        fi
+    done
+
+    if (( ssh_acquisition_found == 0 )); then
+        mkdir -p /etc/crowdsec/acquis.d || return 1
+
+        cat > /etc/crowdsec/acquis.d/sshd-journald.yaml <<'EOF'
+source: journalctl
+journalctl_filter:
+  - "_SYSTEMD_UNIT=ssh.service"
+labels:
+  type: syslog
+EOF
+
+        echo "✓ Добавлен SSH acquisition через journald."
+    else
+        echo "Существующий SSH acquisition сохраняем без изменений."
+    fi
+
+    echo "=== [3/7] Проверка SSH-парсера Debian 13 ==="
+
+    local ssh_success_parser="/etc/crowdsec/parsers/s01-parse/sshd-success-logs.yaml"
+
+    if [ ! -f "$ssh_success_parser" ]; then
+        echo "ОШИБКА: SSH success parser отсутствует."
+        return 1
+    fi
+
+    if grep -Eq "^filter:.*sshd-session" "$ssh_success_parser"; then
+        echo "✓ SSH parser поддерживает sshd-session."
+    elif grep -Fxq "filter: \"evt.Parsed.program == 'sshd'\"" "$ssh_success_parser"; then
+        cp -a "$ssh_success_parser" "${ssh_success_parser}.pre-debian13" || return 1
+
+        if ! sed -i \
+            "s|^filter:.*|filter: \"evt.Parsed.program in ['sshd', 'sshd-session']\"|" \
+            "$ssh_success_parser"; then
+            echo "ОШИБКА: не удалось обновить SSH parser."
+            return 1
+        fi
+
+        echo "✓ Добавлена поддержка sshd-session."
+    else
+        echo "ОШИБКА: неизвестный формат SSH success parser."
+        return 1
+    fi
+
+    if ! crowdsec -t; then
+        echo "ОШИБКА: проверка конфигурации CrowdSec не пройдена."
+        return 1
+    fi
+
+    echo "=== [4/7] Настройка порта LAPI ==="
+
+    local lapi_listen_count
+    lapi_listen_count=$(grep -Ec '^[[:space:]]*listen_uri:' /etc/crowdsec/config.yaml) || true
+
+    if [[ "$lapi_listen_count" != "1" ]]; then
+        echo "ОШИБКА: ожидался ровно один listen_uri в /etc/crowdsec/config.yaml; найдено: $lapi_listen_count"
+        return 1
+    fi
+
+    local existing_lapi
+    existing_lapi=$(sed -nE \
+        's/^[[:space:]]*listen_uri:[[:space:]]*(127\.0\.0\.1|localhost|0\.0\.0\.0):([0-9]+).*$/\2/p' \
+        /etc/crowdsec/config.yaml | head -n 1)
+
+    if (( crowdsec_config_existed == 1 )); then
+        if [[ ! "$existing_lapi" =~ ^[0-9]+$ ]] ||
+           (( 10#$existing_lapi < 1 || 10#$existing_lapi > 65535 )); then
+            echo "ОШИБКА: существующий LAPI-порт не распознан."
+            return 1
+        fi
+
+        LAPI_PORT="$existing_lapi"
+        if grep -Eq '^[[:space:]]*listen_uri:[[:space:]]*0\.0\.0\.0:' /etc/crowdsec/config.yaml; then
+            echo "ОШИБКА: существующий LAPI слушает 0.0.0.0; проверьте вручную."
+            return 1
+        fi
+        log "Сохраняем существующий LAPI-порт: $LAPI_PORT"
+    else
+        if ! LAPI_PORT=$(find_free_port); then
+            echo "ОШИБКА: не удалось выбрать LAPI-порт."
+            return 1
+        fi
+
+        if [[ ! "$existing_lapi" =~ ^[0-9]+$ ]]; then
+            echo "ОШИБКА: исходный listen_uri не распознан."
+            return 1
+        fi
+
+        if ! sed -i -E \
+            "s|^([[:space:]]*)listen_uri:[[:space:]]*.*|\1listen_uri: 127.0.0.1:${LAPI_PORT}|" \
+            /etc/crowdsec/config.yaml; then
+            echo "ОШИБКА: не удалось изменить listen_uri."
+            return 1
+        fi
+
+        if ! grep -Eq "^[[:space:]]*listen_uri:[[:space:]]*127\.0\.0\.1:${LAPI_PORT}([[:space:]]|$)" /etc/crowdsec/config.yaml; then
+            echo "ОШИБКА: LAPI listen_uri не установлен корректно."
+            return 1
+        fi
+        log "Выбран LAPI-порт: $LAPI_PORT"
+    fi
+
+    if [ ! -f /etc/crowdsec/local_api_credentials.yaml ]; then
+        echo "ОШИБКА: local_api_credentials.yaml отсутствует."
+        return 1
+    fi
+
+    # Update only the URL field; preserve machine login and password.
+    local credentials_file="/etc/crowdsec/local_api_credentials.yaml"
+    local credentials_url_count
+
+    credentials_url_count=$(grep -Ec '^[[:space:]]*url:' "$credentials_file") || true
+
+    if [[ "$credentials_url_count" != "1" ]]; then
+        echo "ОШИБКА: ожидался ровно один url в credentials; найдено: $credentials_url_count"
+        return 1
+    fi
+
+    if ! grep -Eq '^[[:space:]]*url:[[:space:]]*http://(127\.0\.0\.1|localhost):[0-9]+/?[[:space:]]*$' "$credentials_file"; then
+        echo "ОШИБКА: URL локального API имеет неожиданный формат."
+        return 1
+    fi
+
+    local credentials_source_port
+    credentials_source_port=$(sed -nE \
+        's#^[[:space:]]*url:[[:space:]]*http://(127\.0\.0\.1|localhost):([0-9]+)/?[[:space:]]*$#\2#p' \
+        "$credentials_file")
+
+    if [[ ! "$credentials_source_port" =~ ^[0-9]{1,5}$ ]]; then
+        echo "ОШИБКА: некорректный формат порта локального API."
+        return 1
+    fi
+
+    if (( 10#$credentials_source_port < 1 || 10#$credentials_source_port > 65535 )); then
+        echo "ОШИБКА: порт локального API вне диапазона 1–65535."
+        return 1
+    fi
+
+    if ! sed -i -E \
+        "s#^([[:space:]]*url:[[:space:]]*)http://[^[:space:]]+#\1http://127.0.0.1:${LAPI_PORT}#" \
+        "$credentials_file"; then
+        echo "ОШИБКА: не удалось обновить URL локального API."
+        return 1
+    fi
+
+    if ! grep -Eq "^[[:space:]]*url:[[:space:]]*http://127\.0\.0\.1:${LAPI_PORT}[[:space:]]*$" "$credentials_file"; then
+        echo "ОШИБКА: URL локального API не установлен корректно."
+        return 1
+    fi
+
+    echo "Порт LAPI: ${LAPI_PORT}"
+
+    echo "=== [5/7] Запуск CrowdSec ==="
+    if ! systemctl enable crowdsec; then
+        echo "ОШИБКА: не удалось включить CrowdSec."
+        return 1
+    fi
+
+    if ! systemctl restart crowdsec; then
+        echo "ОШИБКА: не удалось запустить CrowdSec."
+        journalctl -u crowdsec -n 30 --no-pager
+        return 1
+    fi
+
+    sleep 5
+
+    if ! systemctl is-active --quiet crowdsec; then
+        echo "ОШИБКА: CrowdSec не запустился!"
+        journalctl -u crowdsec -n 20 --no-pager
+        return 1
+    fi
+
+    echo "=== [6/7] Установка Firewall Bouncer ==="
+
+    # LAPI уже настроен, CrowdSec запущен.
+    # postinst пакета самостоятельно создаёт регистрацию и API-ключ.
+    if ! apt-get install -y --no-remove crowdsec-firewall-bouncer-iptables ipset; then
+        echo "ОШИБКА: установка Firewall Bouncer завершилась неудачно."
+        return 1
+    fi
+
+    # Пакет Bouncer самостоятельно регистрируется через postinst.
+    # Не создаём вторую регистрацию и не перевыпускаем API-ключ.
+    local bouncer_config="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
+    local bouncer_id_file="${bouncer_config}.id"
+    if [ ! -f "$bouncer_config" ]; then
+        echo "ОШИБКА: конфигурация Firewall Bouncer отсутствует."
+        return 1
+    fi
+
+    # Проверяем наличие ключа, не выводя секрет в терминал.
+    if ! awk '
+        /^[[:space:]]*api_key:[[:space:]]*/ {
+            sub(/^[[:space:]]*api_key:[[:space:]]*/, "")
+            gsub(/^[[:space:]"]+|[[:space:]"]+$/, "")
+            if ($0 != "" && $0 != "<API_KEY>" && $0 != "$API_KEY") valid=1
+        }
+        END {exit !valid}
+    ' "$bouncer_config"; then
+        echo "ОШИБКА: API-ключ Bouncer отсутствует или содержит заглушку."
+        return 1
+    fi
+
+    if [ ! -s "$bouncer_id_file" ]; then
+        echo "ПРЕДУПРЕЖДЕНИЕ: файл идентификатора Bouncer отсутствует."
+        echo "Существующую регистрацию и API-ключ сохраняем."
+    fi
+
+    # Изменяем только адрес локального API.
+    # Без обратных ссылок sed: так исключаем ошибки экранирования.
+    if ! sed -i -E \
+        "s|^[[:space:]]*api_url:[[:space:]]*.*|api_url: http://127.0.0.1:${LAPI_PORT}/|" \
+        "$bouncer_config"; then
+        echo "ОШИБКА: не удалось настроить адрес LAPI для Bouncer."
+        return 1
+    fi
+
+    if ! grep -Fxq "api_url: http://127.0.0.1:${LAPI_PORT}/" "$bouncer_config"; then
+        echo "ОШИБКА: адрес LAPI не записан в конфигурацию Bouncer."
+        return 1
+    fi
+
+    log "Используем API-ключ, созданный пакетом Bouncer."
+    echo "=== [6/7] Запуск установленного Bouncer ==="
+    if ! systemctl enable crowdsec-firewall-bouncer; then
+        echo "ОШИБКА: не удалось включить Firewall Bouncer."
+        return 1
+    fi
+
+    if ! systemctl restart crowdsec-firewall-bouncer; then
+        echo "ОШИБКА: не удалось запустить Firewall Bouncer."
+        journalctl -u crowdsec-firewall-bouncer -n 30 --no-pager
+        return 1
+    fi
+
+    sleep 3
+
+    if ! systemctl is-active --quiet crowdsec-firewall-bouncer; then
+        echo "ОШИБКА: Bouncer не запустился!"
+        journalctl -u crowdsec-firewall-bouncer -n 20 --no-pager
+        return 1
+    fi
+
+    echo "=== [7/7] Проверка существующего firewall ==="
+
+    # Не сбрасываем, не включаем и не перезапускаем UFW.
+    # Не перезаписываем общие файлы iptables/ipset.
+    if command -v ufw >/dev/null 2>&1; then
+        ufw status
+    else
+        echo "UFW не установлен — состояние firewall не изменяем."
+    fi
+
+    echo ""
+    echo "========================================="
+    echo "=== CrowdSec установлен ==="
+    echo "========================================="
+    echo "LAPI порт: ${LAPI_PORT}"
+    echo ""
+    cscli bouncers list
+    echo ""
+    echo "Мониторинг: cscli decisions list"
+    echo "Метрики:    cscli metrics"
+}
+; then
+
+        echo "Подключение официального APT-репозитория CrowdSec..."
+
+        if ! apt-get install -y --no-remove ca-certificates curl gnupg; then
+            echo "ОШИБКА: не удалось установить зависимости репозитория."
+            return 1
+        fi
+
+        install -d -m 0755 /etc/apt/keyrings
+
+        local cs_tmp_key
+        cs_tmp_key="$(mktemp)" || return 1
+
+        if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 45 \
+            -o "$cs_tmp_key" \
+            "https://packagecloud.io/crowdsec/crowdsec/gpgkey"; then
+            rm -f "$cs_tmp_key"
+            echo "ОШИБКА: не удалось скачать ключ CrowdSec."
+            return 1
+        fi
+
+        local cs_actual_fp
+        cs_actual_fp="$(gpg --batch --show-keys --with-colons "$cs_tmp_key" 2>/dev/null |
+            awk -F: '$1 == "fpr" {print $10; exit}')"
+
+        if [ "$cs_actual_fp" != "$cs_expected_fp" ]; then
+            rm -f "$cs_tmp_key"
+            echo "ОШИБКА: fingerprint ключа CrowdSec не совпадает!"
+            return 1
+        fi
+
+        if ! gpg --batch --yes --dearmor \
+            -o "$cs_key_file" "$cs_tmp_key"; then
+            rm -f "$cs_tmp_key"
+            echo "ОШИБКА: не удалось установить ключ CrowdSec."
+            return 1
+        fi
+        rm -f "$cs_tmp_key"
+        chmod 0644 "$cs_key_file"
+
+        printf '%s\n' \
+            "deb [signed-by=$cs_key_file] https://packagecloud.io/crowdsec/crowdsec/any/ any main" \
+            > "$cs_repo_file"
+
+        if ! apt-get update; then
+            echo "ОШИБКА: обновление APT после добавления CrowdSec."
+            return 1
+        fi
+    fi
+
+    # ── PREFLIGHT: пакеты APT и доступность CrowdSec Hub ──
+    # Удалённый установочный скрипт не используется.
+    # Существующий firewall не изменяем.
+    local cs_package
+    for cs_package in crowdsec crowdsec-firewall-bouncer-iptables; do
+        if ! apt-cache policy "$cs_package" |
+            grep -Eq 'Candidate: [^ (]+$'; then
+            echo "ОШИБКА: пакет $cs_package недоступен через APT."
+            return 1
+        fi
+    done
+
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "ОШИБКА: curl отсутствует (установите curl до запуска)."
+        return 1
+    fi
+    if ! dpkg-query -W -f='${Status}' crowdsec 2>/dev/null | grep -Fq 'install ok installed' &&
+       ! curl -fsSL --connect-timeout 6 --max-time 15 \
+        -o /dev/null https://hub.crowdsec.net/; then
+        echo "ОШИБКА: CrowdSec Hub недоступен."
+        echo "Установка остановлена до изменения пакетов."
+        return 2
+    fi
+
+    echo "✓ Пакеты CrowdSec доступны в APT, CrowdSec Hub отвечает."
+
+    # CrowdSec работает совместно с существующим firewall.
+    # Не устанавливаем iptables-persistent и не изменяем UFW.
+    # Пакеты устанавливаются без разрешения удалять существующие.
+    if ! apt-get install -y --no-remove curl; then
+        echo "ОШИБКА: не удалось установить curl без удаления пакетов."
+        return 1
+    fi
+
+    if ! apt-get install -y --no-remove crowdsec; then
+        echo "ОШИБКА: установка CrowdSec требует удаления других пакетов или завершилась ошибкой."
+        return 1
+    fi
+    sleep 3
+
+    if [ ! -f /etc/crowdsec/config.yaml ]; then
+        echo "ОШИБКА: config.yaml не создался!"
+        return 1
+    fi
+    echo "✓ CrowdSec установлен."
+
+    echo "=== [2/7] Установка коллекций ==="
+    # Базовые коллекции обязательны для работы защиты SSH/Linux.
+    local collection
+    for collection in crowdsecurity/linux crowdsecurity/sshd; do
+        if cscli collections inspect "$collection" >/dev/null 2>&1; then
+            echo "✓ Коллекция уже установлена: $collection"
+            continue
+        fi
+
+        echo "Установка обязательной коллекции: $collection"
+        if ! timeout 60 cscli collections install "$collection"; then
+            echo "ОШИБКА: не удалось установить $collection"
+            return 1
+        fi
+    done
+
+    # Дополнительные коллекции не должны скрывать ошибки.
+    for collection in \
+        crowdsecurity/iptables \
+        crowdsecurity/base-http-scenarios \
+        crowdsecurity/whitelist-good-actors; do
+        if cscli collections inspect "$collection" >/dev/null 2>&1; then
+            echo "✓ Дополнительная коллекция уже установлена: $collection"
+            continue
+        fi
+        echo "Установка дополнительной коллекции: $collection"
+        if ! timeout 60 cscli collections install "$collection"; then
+            echo "ПРЕДУПРЕЖДЕНИЕ: коллекция $collection не установлена."
+        fi
+    done
+
+    echo "=== [3/7] Docker acquisition (проверка) ==="
+    # Не подключаем произвольные контейнеры как syslog.
+    # Для Docker нужны подходящие парсеры и явный выбор контейнеров.
+    # Существующие acquisition-файлы не изменяем.
+    echo "Docker-логи автоматически не подключаются."
+
+    echo "=== [3/7] SSH journald acquisition ==="
+
+    # Не дублируем существующие SSH acquisition.
+    # На Debian 13 sshd-session пишет в journald.
+    local ssh_acquisition_found=0
+    local acquisition_file
+
+    for acquisition_file in /etc/crowdsec/acquis.yaml /etc/crowdsec/acquis.d/*.yaml; do
+        [ -f "$acquisition_file" ] || continue
+
+        # Проверяем активные строки конфигурации, а не комментарии.
+        if grep -Eq '^[[:space:]]*source:[[:space:]]*journalctl([[:space:]]|$)' "$acquisition_file" &&
+           grep -Eq '^[[:space:]]*-[[:space:]]*"?(_SYSTEMD_UNIT=ssh\.service|SYSLOG_IDENTIFIER=sshd-session)' "$acquisition_file"; then
+            echo "Обнаружен SSH acquisition через journald: $acquisition_file"
+            ssh_acquisition_found=1
+            break
+        fi
+
+        if [ -f /var/log/auth.log ] &&
+           grep -Eq '^[[:space:]]*-[[:space:]]*/var/log/auth\.log([[:space:]]|$)' "$acquisition_file"; then
+            echo "Обнаружен SSH acquisition через auth.log: $acquisition_file"
+            ssh_acquisition_found=1
+            break
+        fi
+    done
+
+    if (( ssh_acquisition_found == 0 )); then
+        mkdir -p /etc/crowdsec/acquis.d || return 1
+
+        cat > /etc/crowdsec/acquis.d/sshd-journald.yaml <<'EOF'
+source: journalctl
+journalctl_filter:
+  - "_SYSTEMD_UNIT=ssh.service"
+labels:
+  type: syslog
+EOF
+
+        echo "✓ Добавлен SSH acquisition через journald."
+    else
+        echo "Существующий SSH acquisition сохраняем без изменений."
+    fi
+
+    echo "=== [3/7] Проверка SSH-парсера Debian 13 ==="
+
+    local ssh_success_parser="/etc/crowdsec/parsers/s01-parse/sshd-success-logs.yaml"
+
+    if [ ! -f "$ssh_success_parser" ]; then
+        echo "ОШИБКА: SSH success parser отсутствует."
+        return 1
+    fi
+
+    if grep -Eq "^filter:.*sshd-session" "$ssh_success_parser"; then
+        echo "✓ SSH parser поддерживает sshd-session."
+    elif grep -Fxq "filter: \"evt.Parsed.program == 'sshd'\"" "$ssh_success_parser"; then
+        cp -a "$ssh_success_parser" "${ssh_success_parser}.pre-debian13" || return 1
+
+        if ! sed -i \
+            "s|^filter:.*|filter: \"evt.Parsed.program in ['sshd', 'sshd-session']\"|" \
+            "$ssh_success_parser"; then
+            echo "ОШИБКА: не удалось обновить SSH parser."
+            return 1
+        fi
+
+        echo "✓ Добавлена поддержка sshd-session."
+    else
+        echo "ОШИБКА: неизвестный формат SSH success parser."
+        return 1
+    fi
+
+    if ! crowdsec -t; then
+        echo "ОШИБКА: проверка конфигурации CrowdSec не пройдена."
+        return 1
+    fi
+
+    echo "=== [4/7] Настройка порта LAPI ==="
+
+    local lapi_listen_count
+    lapi_listen_count=$(grep -Ec '^[[:space:]]*listen_uri:' /etc/crowdsec/config.yaml) || true
+
+    if [[ "$lapi_listen_count" != "1" ]]; then
+        echo "ОШИБКА: ожидался ровно один listen_uri в /etc/crowdsec/config.yaml; найдено: $lapi_listen_count"
+        return 1
+    fi
+
+    local existing_lapi
+    existing_lapi=$(sed -nE \
+        's/^[[:space:]]*listen_uri:[[:space:]]*(127\.0\.0\.1|localhost|0\.0\.0\.0):([0-9]+).*$/\2/p' \
+        /etc/crowdsec/config.yaml | head -n 1)
+
+    if (( crowdsec_config_existed == 1 )); then
+        if [[ ! "$existing_lapi" =~ ^[0-9]+$ ]] ||
+           (( 10#$existing_lapi < 1 || 10#$existing_lapi > 65535 )); then
+            echo "ОШИБКА: существующий LAPI-порт не распознан."
+            return 1
+        fi
+
+        LAPI_PORT="$existing_lapi"
+        if grep -Eq '^[[:space:]]*listen_uri:[[:space:]]*0\.0\.0\.0:' /etc/crowdsec/config.yaml; then
+            echo "ОШИБКА: существующий LAPI слушает 0.0.0.0; проверьте вручную."
+            return 1
+        fi
+        log "Сохраняем существующий LAPI-порт: $LAPI_PORT"
+    else
+        if ! LAPI_PORT=$(find_free_port); then
+            echo "ОШИБКА: не удалось выбрать LAPI-порт."
+            return 1
+        fi
+
+        if [[ ! "$existing_lapi" =~ ^[0-9]+$ ]]; then
+            echo "ОШИБКА: исходный listen_uri не распознан."
+            return 1
+        fi
+
+        if ! sed -i -E \
+            "s|^([[:space:]]*)listen_uri:[[:space:]]*.*|\1listen_uri: 127.0.0.1:${LAPI_PORT}|" \
+            /etc/crowdsec/config.yaml; then
+            echo "ОШИБКА: не удалось изменить listen_uri."
+            return 1
+        fi
+
+        if ! grep -Eq "^[[:space:]]*listen_uri:[[:space:]]*127\.0\.0\.1:${LAPI_PORT}([[:space:]]|$)" /etc/crowdsec/config.yaml; then
+            echo "ОШИБКА: LAPI listen_uri не установлен корректно."
+            return 1
+        fi
+        log "Выбран LAPI-порт: $LAPI_PORT"
+    fi
+
+    if [ ! -f /etc/crowdsec/local_api_credentials.yaml ]; then
+        echo "ОШИБКА: local_api_credentials.yaml отсутствует."
+        return 1
+    fi
+
+    # Update only the URL field; preserve machine login and password.
+    local credentials_file="/etc/crowdsec/local_api_credentials.yaml"
+    local credentials_url_count
+
+    credentials_url_count=$(grep -Ec '^[[:space:]]*url:' "$credentials_file") || true
+
+    if [[ "$credentials_url_count" != "1" ]]; then
+        echo "ОШИБКА: ожидался ровно один url в credentials; найдено: $credentials_url_count"
+        return 1
+    fi
+
+    if ! grep -Eq '^[[:space:]]*url:[[:space:]]*http://(127\.0\.0\.1|localhost):[0-9]+/?[[:space:]]*$' "$credentials_file"; then
+        echo "ОШИБКА: URL локального API имеет неожиданный формат."
+        return 1
+    fi
+
+    local credentials_source_port
+    credentials_source_port=$(sed -nE \
+        's#^[[:space:]]*url:[[:space:]]*http://(127\.0\.0\.1|localhost):([0-9]+)/?[[:space:]]*$#\2#p' \
+        "$credentials_file")
+
+    if [[ ! "$credentials_source_port" =~ ^[0-9]{1,5}$ ]]; then
+        echo "ОШИБКА: некорректный формат порта локального API."
+        return 1
+    fi
+
+    if (( 10#$credentials_source_port < 1 || 10#$credentials_source_port > 65535 )); then
+        echo "ОШИБКА: порт локального API вне диапазона 1–65535."
+        return 1
+    fi
+
+    if ! sed -i -E \
+        "s#^([[:space:]]*url:[[:space:]]*)http://[^[:space:]]+#\1http://127.0.0.1:${LAPI_PORT}#" \
+        "$credentials_file"; then
+        echo "ОШИБКА: не удалось обновить URL локального API."
+        return 1
+    fi
+
+    if ! grep -Eq "^[[:space:]]*url:[[:space:]]*http://127\.0\.0\.1:${LAPI_PORT}[[:space:]]*$" "$credentials_file"; then
+        echo "ОШИБКА: URL локального API не установлен корректно."
+        return 1
+    fi
+
+    echo "Порт LAPI: ${LAPI_PORT}"
+
+    echo "=== [5/7] Запуск CrowdSec ==="
+    if ! systemctl enable crowdsec; then
+        echo "ОШИБКА: не удалось включить CrowdSec."
+        return 1
+    fi
+
+    if ! systemctl restart crowdsec; then
+        echo "ОШИБКА: не удалось запустить CrowdSec."
+        journalctl -u crowdsec -n 30 --no-pager
+        return 1
+    fi
+
+    sleep 5
+
+    if ! systemctl is-active --quiet crowdsec; then
+        echo "ОШИБКА: CrowdSec не запустился!"
+        journalctl -u crowdsec -n 20 --no-pager
+        return 1
+    fi
+
+    echo "=== [6/7] Установка Firewall Bouncer ==="
+
+    # LAPI уже настроен, CrowdSec запущен.
+    # postinst пакета самостоятельно создаёт регистрацию и API-ключ.
+    if ! apt-get install -y --no-remove crowdsec-firewall-bouncer-iptables ipset; then
+        echo "ОШИБКА: установка Firewall Bouncer завершилась неудачно."
+        return 1
+    fi
+
+    # Пакет Bouncer самостоятельно регистрируется через postinst.
+    # Не создаём вторую регистрацию и не перевыпускаем API-ключ.
+    local bouncer_config="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
+    local bouncer_id_file="${bouncer_config}.id"
+    if [ ! -f "$bouncer_config" ]; then
+        echo "ОШИБКА: конфигурация Firewall Bouncer отсутствует."
+        return 1
+    fi
+
+    # Проверяем наличие ключа, не выводя секрет в терминал.
+    if ! awk '
+        /^[[:space:]]*api_key:[[:space:]]*/ {
+            sub(/^[[:space:]]*api_key:[[:space:]]*/, "")
+            gsub(/^[[:space:]"]+|[[:space:]"]+$/, "")
+            if ($0 != "" && $0 != "<API_KEY>" && $0 != "$API_KEY") valid=1
+        }
+        END {exit !valid}
+    ' "$bouncer_config"; then
+        echo "ОШИБКА: API-ключ Bouncer отсутствует или содержит заглушку."
+        return 1
+    fi
+
+    if [ ! -s "$bouncer_id_file" ]; then
+        echo "ПРЕДУПРЕЖДЕНИЕ: файл идентификатора Bouncer отсутствует."
+        echo "Существующую регистрацию и API-ключ сохраняем."
+    fi
+
+    # Изменяем только адрес локального API.
+    # Без обратных ссылок sed: так исключаем ошибки экранирования.
+    if ! sed -i -E \
+        "s|^[[:space:]]*api_url:[[:space:]]*.*|api_url: http://127.0.0.1:${LAPI_PORT}/|" \
+        "$bouncer_config"; then
+        echo "ОШИБКА: не удалось настроить адрес LAPI для Bouncer."
+        return 1
+    fi
+
+    if ! grep -Fxq "api_url: http://127.0.0.1:${LAPI_PORT}/" "$bouncer_config"; then
+        echo "ОШИБКА: адрес LAPI не записан в конфигурацию Bouncer."
+        return 1
+    fi
+
+    log "Используем API-ключ, созданный пакетом Bouncer."
     echo "=== [6/7] Запуск установленного Bouncer ==="
     if ! systemctl enable crowdsec-firewall-bouncer; then
         echo "ОШИБКА: не удалось включить Firewall Bouncer."
