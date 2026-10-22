@@ -2045,43 +2045,59 @@ _nextdns_rollback_health() {
 # v3: preserve the original resolver symlink across reboots and switches.
 # Only symlinks to systemd-resolved's supported files are managed automatically.
 _nextdns_resolv_snapshot() {
-    local dir="$1"
+    local dir="$1" state=/var/lib/vps-nextdns
     if [ -L /etc/resolv.conf ]; then
         readlink /etc/resolv.conf > "$dir/resolv-target" || return 1
-    elif [ -e /etc/resolv.conf ]; then
-        echo 'ОШИБКА: /etc/resolv.conf не является symlink; автоматическая замена запрещена' >&2
-        return 1
+    elif [ -f /etc/resolv.conf ]; then
+        cp -a -- /etc/resolv.conf "$dir/resolv-file" || return 1
+    elif [ ! -e /etc/resolv.conf ]; then
+        : > "$dir/resolv-absent" || return 1
     else
-        : > "$dir/resolv-absent"
+        echo 'ОШИБКА: нестандартный тип /etc/resolv.conf' >&2
+        return 1
     fi
-    if [ -f /var/lib/vps-nextdns/resolv-original-target ]; then
-        cp -a /var/lib/vps-nextdns/resolv-original-target "$dir/original-target" || return 1
+    if [ -f "$state/resolv-original-target" ]; then
+        cp -a "$state/resolv-original-target" "$dir/original-target" || return 1
     fi
-    if [ -f /var/lib/vps-nextdns/resolv-original-absent ]; then
-        : > "$dir/original-absent"
+    if [ -f "$state/resolv-original-file" ]; then
+        cp -a "$state/resolv-original-file" "$dir/original-file" || return 1
+    fi
+    if [ -f "$state/resolv-original-absent" ]; then
+        : > "$dir/original-absent" || return 1
     fi
 }
 
 _nextdns_resolv_restore_snapshot() {
-    local dir="$1" target
+    local dir="$1" target tmp state=/var/lib/vps-nextdns
     if [ -f "$dir/resolv-target" ]; then
         target="$(cat "$dir/resolv-target")" || return 1
         ln -sfn -- "$target" /etc/resolv.conf || return 1
+    elif [ -f "$dir/resolv-file" ]; then
+        tmp="$(mktemp /etc/.resolv-restore.XXXXXX)" || return 1
+        if ! cp -a "$dir/resolv-file" "$tmp" || ! mv -Tf "$tmp" /etc/resolv.conf; then
+            rm -f "$tmp"
+            return 1
+        fi
     elif [ -f "$dir/resolv-absent" ]; then
         rm -f /etc/resolv.conf || return 1
     else
         return 1
     fi
-    install -d -m 0755 /var/lib/vps-nextdns || return 1
+    install -d -m 0755 "$state" || return 1
     if [ -f "$dir/original-target" ]; then
-        cp -a "$dir/original-target" /var/lib/vps-nextdns/resolv-original-target || return 1
+        cp -a "$dir/original-target" "$state/resolv-original-target" || return 1
     else
-        rm -f /var/lib/vps-nextdns/resolv-original-target || return 1
+        rm -f "$state/resolv-original-target"
+    fi
+    if [ -f "$dir/original-file" ]; then
+        cp -a "$dir/original-file" "$state/resolv-original-file" || return 1
+    else
+        rm -f "$state/resolv-original-file"
     fi
     if [ -f "$dir/original-absent" ]; then
-        : > /var/lib/vps-nextdns/resolv-original-absent
+        : > "$state/resolv-original-absent" || return 1
     else
-        rm -f /var/lib/vps-nextdns/resolv-original-absent
+        rm -f "$state/resolv-original-absent"
     fi
 }
 
@@ -2091,8 +2107,9 @@ _nextdns_resolv_enable() {
         echo 'ОШИБКА: systemd-resolved stub-resolv.conf отсутствует' >&2; return 1;
     }
     install -d -m 0755 "$state" || return 1
-    if [ ! -e "$state/resolv-original-target" ] && [ ! -e "$state/resolv-original-absent" ]; then
-        # Do not mistake an already configured NextDNS installation for the original.
+    if [ ! -e "$state/resolv-original-target" ] &&
+       [ ! -e "$state/resolv-original-file" ] &&
+       [ ! -e "$state/resolv-original-absent" ]; then
         if [ -f "$dir/previous-resolved.conf" ]; then
             echo 'ПРЕДУПРЕЖДЕНИЕ: исходный resolv.conf неизвестен (миграция с v2).' >&2
             echo 'При отключении оставим stub; не будем выдумывать исходный путь.' >&2
@@ -2103,6 +2120,8 @@ _nextdns_resolv_enable() {
                     printf '%s\n' "$target" > "$state/resolv-original-target" || return 1 ;;
                 *) echo "ОШИБКА: неизвестный resolv.conf: $target" >&2; return 1 ;;
             esac
+        elif [ -f "$dir/resolv-file" ]; then
+            cp -a "$dir/resolv-file" "$state/resolv-original-file" || return 1
         elif [ -f "$dir/resolv-absent" ]; then
             : > "$state/resolv-original-absent" || return 1
         else
@@ -2113,7 +2132,7 @@ _nextdns_resolv_enable() {
 }
 
 _nextdns_resolv_disable() {
-    local state=/var/lib/vps-nextdns target
+    local state=/var/lib/vps-nextdns target tmp
     if [ -f "$state/resolv-original-target" ]; then
         target="$(cat "$state/resolv-original-target")" || return 1
         case "$target" in
@@ -2121,6 +2140,12 @@ _nextdns_resolv_disable() {
             *) echo 'ОШИБКА: сохранён неизвестный путь resolv.conf' >&2; return 1 ;;
         esac
         ln -sfn -- "$target" /etc/resolv.conf || return 1
+    elif [ -f "$state/resolv-original-file" ]; then
+        tmp="$(mktemp /etc/.resolv-disable.XXXXXX)" || return 1
+        if ! cp -a "$state/resolv-original-file" "$tmp" || ! mv -Tf "$tmp" /etc/resolv.conf; then
+            rm -f "$tmp"
+            return 1
+        fi
     elif [ -f "$state/resolv-original-absent" ]; then
         rm -f /etc/resolv.conf || return 1
     else
@@ -2150,9 +2175,25 @@ _nextdns_apply() {
         echo 'Не удалось сохранить /etc/resolv.conf'
         rm -rf "$net_snapshot"; rm -f "$saved" "$old_doh"; return 1
     fi
+    # Debian minimal images may have no systemd-resolved installed at all.
+    # Save /etc/resolv.conf BEFORE installing: the package can change its type.
+    if ! command -v resolvectl >/dev/null 2>&1; then
+        echo 'NextDNS: устанавливаю отсутствующий systemd-resolved'
+        if ! apt-get install -y --no-remove systemd-resolved ||
+           ! _nextdns_resolv_restore_snapshot "$net_snapshot"; then
+            echo 'Не удалось установить resolved или восстановить исходный DNS'
+            _nextdns_resolv_restore_snapshot "$net_snapshot" || true
+            rm -f "$saved" "$old_doh"
+            echo "Снимок оставлен: $net_snapshot"
+            return 1
+        fi
+    fi
     if [ "$protocol" = doh ]; then
         if ! _nextdns_doh_prepare "$profile"; then
             _nextdns_rollback "$conf" "$saved" "$previous" "$dohconf" "$old_doh" "$had_doh" "$was_doh_active"
+            _nextdns_resolv_restore_snapshot "$net_snapshot" || {
+                echo "ОШИБКА: восстановление DNS не удалось; снимок: $net_snapshot"; return 1;
+            }
             rm -rf "$net_snapshot"
             echo 'Системный DNS не переключён'; return 1
         fi
@@ -2255,7 +2296,7 @@ _nextdns_disable() {
     if ! _nextdns_network_restore ||
        ! systemctl restart systemd-resolved ||
        ! _nextdns_resolv_disable ||
-       ! timeout 12 resolvectl query example.com >/dev/null 2>&1; then
+       ! timeout 12 getent ahostsv4 example.com >/dev/null 2>&1; then
         echo 'Стандартный DNS не отвечает. Возвращаю предыдущую конфигурацию.'
         if [ "$had_conf" -eq 1 ]; then cp -a "$saved" "$conf"; fi
         local restore_ok=1
@@ -2273,7 +2314,7 @@ _nextdns_disable() {
         return 1
     fi
     systemctl disable --now nextdns-doh.service >/dev/null 2>&1 || true
-    rm -f /var/lib/vps-nextdns/resolv-original-target /var/lib/vps-nextdns/resolv-original-absent
+    rm -f /var/lib/vps-nextdns/resolv-original-target /var/lib/vps-nextdns/resolv-original-file /var/lib/vps-nextdns/resolv-original-absent
     rm -f "$saved"; rm -rf "$net_snapshot"
     echo 'NextDNS отключён. Используются системные настройки DNS.'
 }
