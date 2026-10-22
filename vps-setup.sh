@@ -1092,6 +1092,49 @@ except Exception as error:
 PYFINGERPRINT
 }
 
+# Install a Hub collection without overwriting Debian's packaged/tainted items.
+# A stale Hub index can cause "invalid download hash" on freshly installed systems.
+# Refresh the index only on that specific failure and retry once.
+crowdsec_ensure_collection() {
+    local collection="$1" required="$2" output rc
+    if cscli collections inspect "$collection" >/dev/null 2>&1; then
+        echo "✓ Коллекция уже установлена: $collection (штатные/tainted файлы сохраняем)"
+        return 0
+    fi
+
+    output=$(mktemp /tmp/crowdsec-hub-install.XXXXXXXX) || return 1
+    echo "Установка коллекции: $collection"
+    if timeout 90 cscli collections install "$collection" >"$output" 2>&1; then
+        cat "$output"
+        rm -f "$output"
+        return 0
+    fi
+
+    if grep -Eiq 'invalid download hash|Downloaded version doesn.t match index' "$output"; then
+        echo "WARN: устаревший индекс CrowdSec Hub; обновляем и повторяем один раз."
+        cat "$output"
+        if timeout 90 cscli hub update; then
+            if timeout 90 cscli collections install "$collection" >"$output" 2>&1; then
+                cat "$output"
+                rm -f "$output"
+                return 0
+            fi
+        fi
+    fi
+
+    cat "$output" >&2
+    if grep -Eiq 'tainted|won.t enable unless --force' "$output"; then
+        echo "WARN: $collection имеет локальные изменения Debian; --force не применяется." >&2
+    fi
+    rm -f "$output"
+    if [ "$required" = required ]; then
+        echo "ОШИБКА: обязательная коллекция $collection не установлена." >&2
+        return 1
+    fi
+    echo "ПРЕДУПРЕЖДЕНИЕ: дополнительная коллекция $collection пропущена."
+    return 0
+}
+
 crowdsec_install() {
     echo ""
     echo "=== [1/7] Установка CrowdSec ==="
@@ -1215,34 +1258,18 @@ crowdsec_install() {
     echo "✓ CrowdSec установлен."
 
     echo "=== [2/7] Установка коллекций ==="
-    # Базовые коллекции обязательны для работы защиты SSH/Linux.
+    # Debian ships an offline Hub and modifies some bundled parsers.
+    # An installed "tainted" collection is deliberately preserved.
     local collection
     for collection in crowdsecurity/linux crowdsecurity/sshd; do
-        if cscli collections inspect "$collection" >/dev/null 2>&1; then
-            echo "✓ Коллекция уже установлена: $collection"
-            continue
-        fi
-
-        echo "Установка обязательной коллекции: $collection"
-        if ! timeout 60 cscli collections install "$collection"; then
-            echo "ОШИБКА: не удалось установить $collection"
-            return 1
-        fi
+        crowdsec_ensure_collection "$collection" required || return 1
     done
 
-    # Дополнительные коллекции не должны скрывать ошибки.
     for collection in \
         crowdsecurity/iptables \
         crowdsecurity/base-http-scenarios \
         crowdsecurity/whitelist-good-actors; do
-        if cscli collections inspect "$collection" >/dev/null 2>&1; then
-            echo "✓ Дополнительная коллекция уже установлена: $collection"
-            continue
-        fi
-        echo "Установка дополнительной коллекции: $collection"
-        if ! timeout 60 cscli collections install "$collection"; then
-            echo "ПРЕДУПРЕЖДЕНИЕ: коллекция $collection не установлена."
-        fi
+        crowdsec_ensure_collection "$collection" optional
     done
 
     echo "=== [3/7] Docker acquisition (проверка) ==="
@@ -1421,7 +1448,8 @@ EOF
 
     if ! systemctl restart crowdsec; then
         echo "ОШИБКА: не удалось запустить CrowdSec."
-        journalctl -u crowdsec -n 30 --no-pager
+        journalctl -u crowdsec -n 50 --no-pager
+        echo "Подсказка: проверьте journald acquisition и целостность журналов: journalctl --verify"
         return 1
     fi
 
