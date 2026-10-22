@@ -1109,8 +1109,170 @@ crowdsec_install() {
     local cs_key_file="/etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg"
     local cs_expected_fp="6A89E3C2303A901A889971D3376ED5326E93CD0C"
 
-    if ! apt-cache policy crowdsec-firewall-bouncer-iptables |
-        grep -Eq 'Candidate: [^ (]+$'; then
+    # Prefer distribution-signed Debian packages when both are available.
+    # Debian's bouncer package name differs from CrowdSec's packagecloud name.
+    local cs_bouncer_pkg="crowdsec-firewall-bouncer-iptables"
+    local cs_package_source="crowdsec-upstream"
+    if apt-cache policy crowdsec | grep -Eq 'Candidate: [^ (]+
+
+        echo "Подключение официального APT-репозитория CrowdSec..."
+
+        if ! apt-get install -y --no-remove ca-certificates curl gnupg; then
+            echo "ОШИБКА: не удалось установить зависимости репозитория."
+            return 1
+        fi
+
+        install -d -m 0755 /etc/apt/keyrings
+
+        local cs_tmp_key
+        cs_tmp_key="$(mktemp)" || return 1
+
+        if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 45 \
+            -o "$cs_tmp_key" \
+            "https://packagecloud.io/crowdsec/crowdsec/gpgkey"; then
+            rm -f "$cs_tmp_key"
+            echo "ОШИБКА: не удалось скачать ключ CrowdSec."
+            return 1
+        fi
+
+        local cs_actual_fp
+        cs_actual_fp="$(gpg --batch --show-keys --with-colons "$cs_tmp_key" 2>/dev/null |
+            awk -F: '$1 == "fpr" {print $10; exit}')"
+
+        if [ "$cs_actual_fp" != "$cs_expected_fp" ]; then
+            rm -f "$cs_tmp_key"
+            echo "ОШИБКА: fingerprint ключа CrowdSec не совпадает!"
+            return 1
+        fi
+
+        if ! gpg --batch --yes --dearmor \
+            -o "$cs_key_file" "$cs_tmp_key"; then
+            rm -f "$cs_tmp_key"
+            echo "ОШИБКА: не удалось установить ключ CrowdSec."
+            return 1
+        fi
+        rm -f "$cs_tmp_key"
+        chmod 0644 "$cs_key_file"
+
+        printf '%s\n' \
+            "deb [signed-by=$cs_key_file] https://packagecloud.io/crowdsec/crowdsec/any/ any main" \
+            > "$cs_repo_file"
+
+        if ! apt-get update; then
+            echo "ОШИБКА: обновление APT после добавления CrowdSec."
+            return 1
+        fi
+    fi
+
+ &&
+       apt-cache policy crowdsec-firewall-bouncer | grep -Eq 'Candidate: [^ (]+
+
+        echo "Подключение официального APT-репозитория CrowdSec..."
+
+        if ! apt-get install -y --no-remove ca-certificates curl gnupg; then
+            echo "ОШИБКА: не удалось установить зависимости репозитория."
+            return 1
+        fi
+
+        install -d -m 0755 /etc/apt/keyrings
+
+        local cs_tmp_key
+        cs_tmp_key="$(mktemp)" || return 1
+
+        if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 45 \
+            -o "$cs_tmp_key" \
+            "https://packagecloud.io/crowdsec/crowdsec/gpgkey"; then
+            rm -f "$cs_tmp_key"
+            echo "ОШИБКА: не удалось скачать ключ CrowdSec."
+            return 1
+        fi
+
+        local cs_actual_fp
+        cs_actual_fp="$(gpg --batch --show-keys --with-colons "$cs_tmp_key" 2>/dev/null |
+            awk -F: '$1 == "fpr" {print $10; exit}')"
+
+        if [ "$cs_actual_fp" != "$cs_expected_fp" ]; then
+            rm -f "$cs_tmp_key"
+            echo "ОШИБКА: fingerprint ключа CrowdSec не совпадает!"
+            return 1
+        fi
+
+        if ! gpg --batch --yes --dearmor \
+            -o "$cs_key_file" "$cs_tmp_key"; then
+            rm -f "$cs_tmp_key"
+            echo "ОШИБКА: не удалось установить ключ CrowdSec."
+            return 1
+        fi
+        rm -f "$cs_tmp_key"
+        chmod 0644 "$cs_key_file"
+
+        printf '%s\n' \
+            "deb [signed-by=$cs_key_file] https://packagecloud.io/crowdsec/crowdsec/any/ any main" \
+            > "$cs_repo_file"
+
+        if ! apt-get update; then
+            echo "ОШИБКА: обновление APT после добавления CrowdSec."
+            return 1
+        fi
+    fi
+
+; then
+        cs_bouncer_pkg="crowdsec-firewall-bouncer"
+        cs_package_source="debian"
+        echo "✓ CrowdSec + Firewall Bouncer доступны из системных зеркал APT."
+    elif ! apt-cache policy "$cs_bouncer_pkg" |
+        grep -Eq 'Candidate: [^ (]+
+
+        echo "Подключение официального APT-репозитория CrowdSec..."
+
+        if ! apt-get install -y --no-remove ca-certificates curl gnupg; then
+            echo "ОШИБКА: не удалось установить зависимости репозитория."
+            return 1
+        fi
+
+        install -d -m 0755 /etc/apt/keyrings
+
+        local cs_tmp_key
+        cs_tmp_key="$(mktemp)" || return 1
+
+        if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 45 \
+            -o "$cs_tmp_key" \
+            "https://packagecloud.io/crowdsec/crowdsec/gpgkey"; then
+            rm -f "$cs_tmp_key"
+            echo "ОШИБКА: не удалось скачать ключ CrowdSec."
+            return 1
+        fi
+
+        local cs_actual_fp
+        cs_actual_fp="$(gpg --batch --show-keys --with-colons "$cs_tmp_key" 2>/dev/null |
+            awk -F: '$1 == "fpr" {print $10; exit}')"
+
+        if [ "$cs_actual_fp" != "$cs_expected_fp" ]; then
+            rm -f "$cs_tmp_key"
+            echo "ОШИБКА: fingerprint ключа CrowdSec не совпадает!"
+            return 1
+        fi
+
+        if ! gpg --batch --yes --dearmor \
+            -o "$cs_key_file" "$cs_tmp_key"; then
+            rm -f "$cs_tmp_key"
+            echo "ОШИБКА: не удалось установить ключ CrowdSec."
+            return 1
+        fi
+        rm -f "$cs_tmp_key"
+        chmod 0644 "$cs_key_file"
+
+        printf '%s\n' \
+            "deb [signed-by=$cs_key_file] https://packagecloud.io/crowdsec/crowdsec/any/ any main" \
+            > "$cs_repo_file"
+
+        if ! apt-get update; then
+            echo "ОШИБКА: обновление APT после добавления CrowdSec."
+            return 1
+        fi
+    fi
+
+; then
 
         echo "Подключение официального APT-репозитория CrowdSec..."
 
@@ -1165,7 +1327,7 @@ crowdsec_install() {
     # Удалённый установочный скрипт не используется.
     # Существующий firewall не изменяем.
     local cs_package
-    for cs_package in crowdsec crowdsec-firewall-bouncer-iptables; do
+    for cs_package in crowdsec "$cs_bouncer_pkg"; do
         if ! apt-cache policy "$cs_package" |
             grep -Eq 'Candidate: [^ (]+$'; then
             echo "ОШИБКА: пакет $cs_package недоступен через APT."
@@ -1445,13 +1607,13 @@ EOF
 
     # LAPI уже настроен, CrowdSec запущен.
     # postinst пакета самостоятельно создаёт регистрацию и API-ключ.
-    if ! apt-get install -y --no-remove crowdsec-firewall-bouncer-iptables ipset; then
+    if ! apt-get install -y --no-remove "$cs_bouncer_pkg" ipset; then
         echo "ОШИБКА: установка Firewall Bouncer завершилась неудачно."
         return 1
     fi
 
-    # Пакет Bouncer самостоятельно регистрируется через postinst.
-    # Не создаём вторую регистрацию и не перевыпускаем API-ключ.
+    # Both Debian and upstream packages can register via postinst.
+    # Do not regenerate a working bouncer key, even across re-runs.
     local bouncer_config="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
     local bouncer_id_file="${bouncer_config}.id"
     if [ ! -f "$bouncer_config" ]; then
@@ -1491,7 +1653,7 @@ EOF
         return 1
     fi
 
-    log "Используем API-ключ, созданный пакетом Bouncer."
+    log "Используем API-ключ, созданный пакетом Bouncer ($cs_package_source)."
     echo "=== [6/7] Запуск установленного Bouncer ==="
     if ! systemctl enable crowdsec-firewall-bouncer; then
         echo "ОШИБКА: не удалось включить Firewall Bouncer."
@@ -6308,16 +6470,40 @@ asb_install_iptables() {
     # НЕ swap (требует идентичных параметров → "type does not match" на v6),
     # НЕ restore целиком. flush целевого совместим с активным правилом в iptables.
     _asb_load() { # <suffix v4|v6>
-        local suf="$1"; local fam="inet" c n=0
-        local name="asn-blacklist-${suf}"
-        [ "$suf" = "v6" ] && fam="inet6"
-        [ -s "$ASB_DIR/blacklist-${suf}.ipset" ] || { rn_warn "$suf: файла нет/пуст — пропуск"; return 1; }
-        ipset create "$name" hash:net family "$fam" maxelem 262144 -exist 2>/dev/null || true
-        ipset flush "$name" 2>/dev/null || true
+        local suf="$1" fam="inet" name stage c n=0 minimum=100
+        name="asn-blacklist-${suf}"
+        stage="asbstage-${suf}-$$"
+        if [ "$suf" = "v6" ]; then fam="inet6"; minimum=5; fi
+        [ -s "$ASB_DIR/blacklist-${suf}.ipset" ] || { rn_warn "$suf: source missing"; return 1; }
+
+        # Build and validate a staging set before touching the live set.
+        # Never flush a live IPSet used by the firewall.
+        ipset create "$name" hash:net family "$fam" maxelem 262144 -exist || return 1
+        ipset destroy "$stage" 2>/dev/null || true
+        ipset create "$stage" hash:net family "$fam" maxelem 262144 || return 1
         while IFS= read -r c; do
-            [ -n "$c" ] && ipset add "$name" "$c" -exist 2>/dev/null && n=$((n+1))
-        done < <(grep -E '^add ' "$ASB_DIR/blacklist-${suf}.ipset" 2>/dev/null | awk '{print $3}')
-        [ "$n" -gt 0 ] || rn_warn "$suf: 0 элементов загружено"
+            [ -n "$c" ] || continue
+            if ! ipset add "$stage" "$c" -exist; then
+                rn_error "$suf: invalid CIDR: $c"
+                ipset destroy "$stage" 2>/dev/null || true
+                return 1
+            fi
+            n=$((n+1))
+        done < <(grep -E '^add ' "$ASB_DIR/blacklist-${suf}.ipset" | awk '{print $3}')
+        local actual
+        actual=$(ipset list "$stage" 2>/dev/null | awk '/^Number of entries:/ {print $4}')
+        if [ -z "$actual" ] || [ "$actual" -lt "$minimum" ]; then
+            rn_error "$suf: suspiciously short list ($actual entries)"
+            ipset destroy "$stage" 2>/dev/null || true
+            return 1
+        fi
+        if ! ipset swap "$stage" "$name"; then
+            rn_error "$suf: atomic swap failed; original list preserved"
+            ipset destroy "$stage" 2>/dev/null || true
+            return 1
+        fi
+        ipset destroy "$stage" 2>/dev/null || true
+        echo "  ✓ $suf: ${actual} CIDR loaded atomically"
     }
     _asb_load v4
     _asb_load v6
