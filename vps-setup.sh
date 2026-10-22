@@ -6215,17 +6215,25 @@ ASB_LOG="/var/log/as-blacklist-update.log"
 ASB_CRON_SCRIPT="/usr/local/bin/as-blacklist-update.sh"
 
 asb_detect_crowdsec() {
-    # Возвращает режим bouncer: "iptables", "nftables" или ""
-    if systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
-        local cfg="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
-        if [ -f "$cfg" ]; then
-            grep -m1 "^mode:" "$cfg" 2>/dev/null | awk '{print $2}' | tr -d '"'
-        else
-            echo "iptables"
-        fi
-    else
+    # Debian's bouncer uses mode: ${BACKEND} in the base file and
+    # mode: nftables in .yaml.local. The local override takes precedence.
+    if ! systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
         echo ""
+        return 0
     fi
+    local cfg="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
+    local override="${cfg}.local"
+    local mode=""
+    if [ -f "$override" ]; then
+        mode=$(sed -nE 's/^[[:space:]]*mode:[[:space:]]*["\x27]?([a-zA-Z0-9_-]+).*$/\1/p' "$override" | tail -n 1)
+    fi
+    if [ -z "$mode" ] && [ -f "$cfg" ]; then
+        mode=$(sed -nE 's/^[[:space:]]*mode:[[:space:]]*["\x27]?([a-zA-Z0-9_-]+).*$/\1/p' "$cfg" | tail -n 1)
+    fi
+    case "$mode" in
+        nftables|iptables) echo "$mode" ;;
+        *) echo "unknown" ;;
+    esac
 }
 
 asb_detect_trafficguard() {
@@ -6300,19 +6308,54 @@ asb_install_iptables() {
     # НЕ swap (требует идентичных параметров → "type does not match" на v6),
     # НЕ restore целиком. flush целевого совместим с активным правилом в iptables.
     _asb_load() { # <suffix v4|v6>
-        local suf="$1"; local fam="inet" c n=0
-        local name="asn-blacklist-${suf}"
-        [ "$suf" = "v6" ] && fam="inet6"
-        [ -s "$ASB_DIR/blacklist-${suf}.ipset" ] || { rn_warn "$suf: файла нет/пуст — пропуск"; return 1; }
-        ipset create "$name" hash:net family "$fam" maxelem 262144 -exist 2>/dev/null || true
-        ipset flush "$name" 2>/dev/null || true
-        while IFS= read -r c; do
-            [ -n "$c" ] && ipset add "$name" "$c" -exist 2>/dev/null && n=$((n+1))
-        done < <(grep -E '^add ' "$ASB_DIR/blacklist-${suf}.ipset" 2>/dev/null | awk '{print $3}')
-        [ "$n" -gt 0 ] || rn_warn "$suf: 0 элементов загружено"
+        local suf="$1" fam="inet" name stage cidr actual minimum=100
+        name="asn-blacklist-${suf}"
+        stage="asbstage-${suf}-$$"
+        if [ "$suf" = "v6" ]; then fam="inet6"; minimum=5; fi
+        if [ ! -s "$ASB_DIR/blacklist-${suf}.ipset" ]; then
+            rn_warn "$suf: файл отсутствует или пуст"
+            return 1
+        fi
+
+        # Populate staging completely before changing any live firewall set.
+        ipset create "$stage" hash:net family "$fam" maxelem 262144 || return 1
+        while IFS= read -r cidr; do
+            [ -n "$cidr" ] || continue
+            if ! ipset add "$stage" "$cidr" -exist; then
+                rn_error "$suf: некорректная подсеть $cidr"
+                ipset destroy "$stage" 2>/dev/null || true
+                return 1
+            fi
+        done < <(awk '$1=="add" && $2=="blacklist-'"${suf}"'" {print $3}' "$ASB_DIR/blacklist-${suf}.ipset")
+
+        actual=$(ipset list "$stage" | awk '/^Number of entries:/ {print $4}')
+        if ! [[ "$actual" =~ ^[0-9]+$ ]] || (( actual < minimum )); then
+            rn_error "$suf: подозрительно короткий список ($actual)"
+            ipset destroy "$stage" 2>/dev/null || true
+            return 1
+        fi
+        # For first installs create the target only after validation.
+        if ! ipset list "$name" >/dev/null 2>&1; then
+            if ! ipset create "$name" hash:net family "$fam" maxelem 262144; then
+                ipset destroy "$stage" 2>/dev/null || true
+                return 1
+            fi
+        fi
+        if ! ipset swap "$stage" "$name"; then
+            rn_error "$suf: ipset swap не выполнен; прежний список сохранён"
+            ipset destroy "$stage" 2>/dev/null || true
+            return 1
+        fi
+        ipset destroy "$stage" 2>/dev/null || true
+        echo "  ✓ $suf: атомарно загружено $actual подсетей"
     }
-    _asb_load v4
-    _asb_load v6
+    if ! _asb_load v4; then
+        rn_error "IPv4 AS-список не применён."
+        return 1
+    fi
+    if ! _asb_load v6; then
+        rn_warn "IPv6 AS-список не обновлён; прежние правила сохранены."
+    fi
     # Проверка: сет реально создан и непуст, иначе нет смысла ставить правило
     if ! ipset list asn-blacklist-v4 &>/dev/null || \
        [ "$(ipset list asn-blacklist-v4 2>/dev/null | awk '/Number of entries/{print $4}')" = "0" ]; then
