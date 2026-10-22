@@ -1293,32 +1293,17 @@ EOF
         echo "Существующий SSH acquisition сохраняем без изменений."
     fi
 
-    echo "=== [3/7] Проверка SSH-парсера Debian 13 ==="
+    echo "=== [3/7] Проверка SSH-парсера ==="
 
-    local ssh_success_parser="/etc/crowdsec/parsers/s01-parse/sshd-success-logs.yaml"
-
-    if [ ! -f "$ssh_success_parser" ]; then
-        echo "ОШИБКА: SSH success parser отсутствует."
+    # Debian 13 provides crowdsecurity/sshd-logs with sshd-session support
+    # already backported. Do not depend on upstream-only parser filenames,
+    # or rewrite a distribution-managed parser.
+    if ! cscli parsers inspect crowdsecurity/sshd-logs >/dev/null 2>&1; then
+        echo "ОШИБКА: SSH parser crowdsecurity/sshd-logs не установлен."
+        echo "Проверьте: cscli parsers list"
         return 1
     fi
-
-    if grep -Eq "^filter:.*sshd-session" "$ssh_success_parser"; then
-        echo "✓ SSH parser поддерживает sshd-session."
-    elif grep -Fxq "filter: \"evt.Parsed.program == 'sshd'\"" "$ssh_success_parser"; then
-        cp -a "$ssh_success_parser" "${ssh_success_parser}.pre-debian13" || return 1
-
-        if ! sed -i \
-            "s|^filter:.*|filter: \"evt.Parsed.program in ['sshd', 'sshd-session']\"|" \
-            "$ssh_success_parser"; then
-            echo "ОШИБКА: не удалось обновить SSH parser."
-            return 1
-        fi
-
-        echo "✓ Добавлена поддержка sshd-session."
-    else
-        echo "ОШИБКА: неизвестный формат SSH success parser."
-        return 1
-    fi
+    echo "✓ SSH parser crowdsecurity/sshd-logs установлен."
 
     if ! crowdsec -t; then
         echo "ОШИБКА: проверка конфигурации CrowdSec не пройдена."
