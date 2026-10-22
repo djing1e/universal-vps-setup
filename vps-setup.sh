@@ -6505,8 +6505,13 @@ asb_install_iptables() {
         ipset destroy "$stage" 2>/dev/null || true
         echo "  ✓ $suf: ${actual} CIDR loaded atomically"
     }
-    _asb_load v4
-    _asb_load v6
+    if ! _asb_load v4; then
+        rn_error "Не удалось применить IPv4 AS-список; прежний список сохранён."
+        return 1
+    fi
+    if ! _asb_load v6; then
+        rn_warn "Не удалось применить IPv6 AS-список; прежний список сохранён."
+    fi
     # Проверка: сет реально создан и непуст, иначе нет смысла ставить правило
     if ! ipset list asn-blacklist-v4 &>/dev/null || \
        [ "$(ipset list asn-blacklist-v4 2>/dev/null | awk '/Number of entries/{print $4}')" = "0" ]; then
