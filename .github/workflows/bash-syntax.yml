@@ -1,0 +1,28 @@
+name: Bash syntax
+
+on:
+  push:
+    paths:
+      - 'vps-setup.sh'
+      - '.github/workflows/bash-syntax.yml'
+  pull_request:
+    paths:
+      - 'vps-setup.sh'
+      - '.github/workflows/bash-syntax.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  syntax:
+    name: bash -n vps-setup.sh
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Validate Bash syntax
+        shell: bash
+        run: |
+          bash -n vps-setup.sh
+          echo 'Bash syntax OK'
