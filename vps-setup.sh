@@ -1223,19 +1223,16 @@ crowdsec_install() {
         fi
     done
 
-    if ! command -v curl >/dev/null 2>&1; then
-        echo "ОШИБКА: curl отсутствует (установите curl до запуска)."
-        return 1
+    # Debian 13 ships an offline CrowdSec Hub with the distribution packages.
+    # A network probe to hub.crowdsec.net is not a reliable precondition:
+    # restricted VPS networks can install from APT even when Hub is blocked.
+    # Never block Debian package installation solely because Hub is unreachable.
+    if [ "$cs_package_source" = "debian" ]; then
+        echo "✓ CrowdSec доступен через APT; онлайн Hub для установки не требуется."
+    else
+        echo "ℹ CrowdSec Hub может быть недоступен; установка из APT будет продолжена."
+        echo "  Отсутствующие Hub-коллекции будут проверены отдельно."
     fi
-    if ! dpkg-query -W -f='${Status}' crowdsec 2>/dev/null | grep -Fq 'install ok installed' &&
-       ! curl -fsSL --connect-timeout 6 --max-time 15 \
-        -o /dev/null https://hub.crowdsec.net/; then
-        echo "ОШИБКА: CrowdSec Hub недоступен."
-        echo "Установка остановлена до изменения пакетов."
-        return 2
-    fi
-
-    echo "✓ Пакеты CrowdSec доступны в APT, CrowdSec Hub отвечает."
 
     # CrowdSec работает совместно с существующим firewall.
     # Не устанавливаем iptables-persistent и не изменяем UFW.
