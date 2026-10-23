@@ -2211,8 +2211,39 @@ _nextdns_apply() {
     # Save /etc/resolv.conf BEFORE installing: the package can change its type.
     if ! command -v resolvectl >/dev/null 2>&1; then
         echo 'NextDNS: устанавливаю отсутствующий systemd-resolved'
-        if ! apt-get install -y --no-remove systemd-resolved ||
-           ! _nextdns_resolv_restore_snapshot "$net_snapshot"; then
+        # systemd-resolved conflicts with openresolv on some minimal Debian VPS.
+        # Permit that one known removal ONLY after inspecting APT's simulation.
+        # Keep --no-remove for every other package transaction.
+        local resolved_apt_plan resolved_removals
+        resolved_apt_plan=$(LC_ALL=C apt-get -s install systemd-resolved) || {
+            echo 'Не удалось рассчитать безопасную установку systemd-resolved'
+            echo "Снимок оставлен: $net_snapshot"
+            rm -f "$saved" "$old_doh"
+            return 1
+        }
+        resolved_removals=$(printf '%s\n' "$resolved_apt_plan" |
+            awk '$1=="Remv" {print $2}' | sort -u)
+        if [ -n "$resolved_removals" ] &&
+           [ "$resolved_removals" != "openresolv" ]; then
+            echo "ОШИБКА: APT предлагает удалить неожиданные пакеты:"
+            printf '%s\n' "$resolved_removals"
+            echo 'Установка остановлена, сетевые настройки не изменены.'
+            echo "Снимок оставлен: $net_snapshot"
+            rm -f "$saved" "$old_doh"
+            return 1
+        fi
+        if [ "$resolved_removals" = "openresolv" ]; then
+            echo 'NextDNS: разрешена замена только openresolv на systemd-resolved.'
+            if ! DEBIAN_FRONTEND=noninteractive apt-get install -y systemd-resolved ||
+               ! _nextdns_resolv_restore_snapshot "$net_snapshot"; then
+                echo 'Не удалось установить resolved или восстановить исходный DNS'
+                _nextdns_resolv_restore_snapshot "$net_snapshot" || true
+                rm -f "$saved" "$old_doh"
+                echo "Снимок оставлен: $net_snapshot"
+                return 1
+            fi
+        elif ! apt-get install -y --no-remove systemd-resolved ||
+             ! _nextdns_resolv_restore_snapshot "$net_snapshot"; then
             echo 'Не удалось установить resolved или восстановить исходный DNS'
             _nextdns_resolv_restore_snapshot "$net_snapshot" || true
             rm -f "$saved" "$old_doh"
