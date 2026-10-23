@@ -466,25 +466,35 @@ enable_managed_blocklist_timer() {
 
 vps_fetch_github() {
     local user="$1" repo="$2" branch="$3" path="$4" out="$5"
-    local tmp="${out}.tmp.$$" url label
+    local tmp="${out}.tmp.$$" url label err="${out}.curl-error.$$"
     local url_raw="https://raw.githubusercontent.com/${user}/${repo}/${branch}/${path}"
     local url_jsd="https://cdn.jsdelivr.net/gh/${user}/${repo}@${branch}/${path}"
 
-    # First prefer fresh GitHub Raw (currently reachable on some RU hosts);
-    # fall back to jsDelivr when GitHub Raw is unavailable.
-    # Never overwrite an existing list on a failed/empty download.
+    # GitHub Raw is preferred; jsDelivr is a fallback, not a failed installation.
+    # Keep the old file intact unless a replacement is downloaded successfully.
     for label in raw jsdelivr; do
         if [ "$label" = raw ]; then url="$url_raw"; else url="$url_jsd"; fi
-        rm -f -- "$tmp"
-        if curl -4 -fsSL --retry 1 --connect-timeout 5 --max-time 30             -o "$tmp" "$url" && [ -s "$tmp" ]; then
-            mv -f -- "$tmp" "$out" || return 1
-            echo "✓ GitHub download ($label): ${repo}/${path}"
+        rm -f -- "$tmp" "$err"
+        if curl -4 -fsSL --retry 1 --connect-timeout 5 --max-time 30 \
+            -o "$tmp" "$url" 2>"$err" && [ -s "$tmp" ]; then
+            if ! mv -f -- "$tmp" "$out"; then
+                cat "$err" >&2
+                rm -f -- "$err"
+                return 1
+            fi
+            rm -f -- "$err"
+            if [ "$label" = jsdelivr ]; then
+                echo "✓ Download successful via fallback jsDelivr: ${repo}/${path}"
+            else
+                echo "✓ Download successful via GitHub Raw: ${repo}/${path}"
+            fi
             return 0
         fi
-        echo "WARN: GitHub download failed ($label): ${repo}/${path}" >&2
+        echo "ℹ Source ${label} unavailable, trying next mirror: ${repo}/${path}" >&2
     done
-    rm -f -- "$tmp"
-    echo "ERROR: both GitHub Raw and jsDelivr unavailable: ${repo}/${path}" >&2
+    echo "ERROR: all download sources failed: ${repo}/${path}" >&2
+    [ ! -s "$err" ] || cat "$err" >&2
+    rm -f -- "$tmp" "$err"
     return 1
 }
 
