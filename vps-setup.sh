@@ -929,81 +929,64 @@ do_docker_mirrors() {
 # =====================================
 # МОДУЛЬ 2: IPv6
 # =====================================
+# Read-only audit: never change firewall/routing as a side effect of inspection.
+vps_ipv6_audit() {
+    echo "=== IPv6 interfaces and routes ==="
+    ip -6 -brief address show 2>/dev/null || true
+    ip -6 route show default 2>/dev/null || true
+    echo "=== IPv6 kernel controls ==="
+    for key in all default lo; do
+        if [ -r "/proc/sys/net/ipv6/conf/$key/disable_ipv6" ]; then
+            printf '%s disable_ipv6=%s\n' "$key" "$(cat "/proc/sys/net/ipv6/conf/$key/disable_ipv6")"
+        fi
+    done
+    echo "=== UFW configuration and policies ==="
+    if command -v ufw >/dev/null 2>&1; then
+        grep -E '^(IPV6|DEFAULT_(INPUT|OUTPUT|FORWARD)_POLICY)=' /etc/default/ufw 2>/dev/null || true
+        ufw status verbose 2>/dev/null || true
+        for family in iptables ip6tables; do
+            command -v "$family" >/dev/null 2>&1 || continue
+            echo "--- $family filter chain policies ---"
+            "$family" -S INPUT 2>/dev/null | grep -E '^-P |^-A INPUT' | head -n 15 || true
+            "$family" -S OUTPUT 2>/dev/null | grep -E '^-P |^-A OUTPUT' | head -n 15 || true
+            "$family" -S FORWARD 2>/dev/null | grep -E '^-P |^-A FORWARD' | head -n 15 || true
+        done
+    fi
+    echo "=== NetBird service and interface ==="
+    systemctl is-active netbird 2>/dev/null || true
+    ip -brief link show 2>/dev/null | grep -E '(^|[[:space:]])wt[0-9]+|netbird' || true
+    if command -v netbird >/dev/null 2>&1; then netbird status 2>/dev/null | head -n 12 || true; fi
+}
+
 setup_ipv6() {
     print_header
     echo "╔══════════════════════════╗"
     echo "║   Управление IPv6       ║"
     echo "╚══════════════════════════╝"
     echo ""
-
-    if sysctl net.ipv6.conf.all.disable_ipv6 2>/dev/null | grep -q "= 1"; then
-        echo "Текущий статус: IPv6 ОТКЛЮЧЁН"
-    else
-        echo "Текущий статус: IPv6 ВКЛЮЧЁН"
-    fi
-
+    vps_ipv6_audit
     echo ""
     echo "  1) Отключить IPv6"
     echo "  2) Включить IPv6"
+    echo "  3) Повторить диагностику (без изменений)"
     echo "  0) Назад"
     echo ""
-    read -e -p "Выберите [0-2]: " IPV6_CHOICE
-
-    case $IPV6_CHOICE in
-        1)
-            echo "--- Отключаем IPv6 ---"
-            # Убираем старые записи
-            sed -i '/net.ipv6.conf.all.disable_ipv6/d' /etc/sysctl.conf
-            sed -i '/net.ipv6.conf.default.disable_ipv6/d' /etc/sysctl.conf
-            sed -i '/net.ipv6.conf.lo.disable_ipv6/d' /etc/sysctl.conf
-
-            cat >> /etc/sysctl.conf << 'EOF'
-net.ipv6.conf.all.disable_ipv6 = 1
-net.ipv6.conf.default.disable_ipv6 = 1
-net.ipv6.conf.lo.disable_ipv6 = 1
-EOF
-            # Применяем только если модуль загружен
-            if [ -f /proc/sys/net/ipv6/conf/all/disable_ipv6 ]; then
-                sysctl -p 2>/dev/null | grep -v "No such file" || true
-            else
-                echo "Модуль IPv6 не загружен — настройки применятся после перезагрузки."
-            fi
-
-            # GRUB
-            if ! grep -q "ipv6.disable=1" /etc/default/grub 2>/dev/null; then
-                sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"/GRUB_CMDLINE_LINUX_DEFAULT="ipv6.disable=1 \1"/' /etc/default/grub
-                update-grub 2>/dev/null || true
-            fi
-
-            # UFW
-            if [ -f /etc/default/ufw ]; then
-                sed -i 's/IPV6=yes/IPV6=no/' /etc/default/ufw
-                ufw reload 2>/dev/null || true
-            fi
-
-            echo "✓ IPv6 отключён. Для полного эффекта требуется перезагрузка."
+    local choice
+    read -e -p "Выберите [0-3]: " choice
+    case "$choice" in
+        0) return 0 ;;
+        3) vps_ipv6_audit; return 0 ;;
+        1|2)
+            # Changing kernel IPv6 and UFW independently can strand connections
+            # (including NetBird relay/P2P) or expose an unfiltered address family.
+            # Fail closed until a validated transactional migration exists.
+            echo "ОПЕРАЦИЯ ЗАБЛОКИРОВАНА: автоматическая смена IPv6 небезопасна."
+            echo "Не изменены sysctl, GRUB, UFW, INPUT/OUTPUT/FORWARD и NetBird."
+            echo "Необходимо отдельно проверить IPv6 default route, UFW IPv4/IPv6"
+            echo "и сохранение существующих NetBird маршрутов и соединений."
+            return 1
             ;;
-        2)
-            echo "--- Включаем IPv6 ---"
-            sed -i '/net.ipv6.conf.all.disable_ipv6/d' /etc/sysctl.conf
-            sed -i '/net.ipv6.conf.default.disable_ipv6/d' /etc/sysctl.conf
-            sed -i '/net.ipv6.conf.lo.disable_ipv6/d' /etc/sysctl.conf
-            sysctl -p
-
-            # GRUB
-            sed -i 's/ipv6\.disable=1 //g' /etc/default/grub 2>/dev/null || true
-            update-grub 2>/dev/null || true
-
-            # UFW
-            if [ -f /etc/default/ufw ]; then
-                sed -i 's/IPV6=no/IPV6=yes/' /etc/default/ufw
-                ufw reload 2>/dev/null || true
-            fi
-
-            echo "✓ IPv6 включён. Для полного эффекта требуется перезагрузка."
-            ;;
-        0) return ;;
-        *) echo "Неверный выбор." ;;
+        *) echo "Неверный выбор."; return 1 ;;
     esac
 }
 
