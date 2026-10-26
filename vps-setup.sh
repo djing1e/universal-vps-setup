@@ -6312,13 +6312,12 @@ asb_install_iptables() {
     cs_mode=$(asb_detect_crowdsec)
     asb_print_env "$cs_mode"
 
-    # Предупреждение если CrowdSec использует nftables
+    # CrowdSec nftables bouncer and dedicated iptables/ipset AS rules can coexist.
+    # Do not stop ONE-BUTTON or manual installation for an unnecessary prompt.
     if [ "$cs_mode" = "nftables" ]; then
-        echo "  ⚠ CrowdSec bouncer работает в режиме nftables."
-        echo "    Рекомендуется использовать пункт 2 (nftables) для совместимости."
+        echo "  ℹ CrowdSec использует nftables; AS_Network_List использует iptables/ipset."
+        echo "    Оба механизма могут работать параллельно. Продолжаю установку."
         echo ""
-        read -e -p "  Всё равно продолжить с iptables? (y/n): " _asb_force
-        [[ "$_asb_force" != "y" ]] && echo "Отменено." && return
     fi
 
     # Зависимости
