@@ -1722,7 +1722,7 @@ _nextdns_doh_stamp() {
     python3 - "$1" "$2" <<'PY_STAMP'
 import base64,ipaddress,sys
 profile,ip=sys.argv[1:]
-assert profile in ('e57d7c','6c366c')
+assert profile in ('e57d7c','a45b7d')
 ipaddress.IPv4Address(ip)
 def lp(v):
     v=v.encode('ascii'); assert len(v)<128; return bytes([len(v)])+v
@@ -2173,7 +2173,7 @@ _nextdns_apply() {
     local conf=/etc/systemd/resolved.conf.d/nextdns.conf
     local dohconf=/etc/nextdns-doh/dnscrypt-proxy.toml
     local saved old_doh tmp previous=0 had_doh=0 was_doh_active=0 net_snapshot
-    case "$profile" in e57d7c|6c366c) ;; *) echo 'Неверный профиль'; return 1;; esac
+    case "$profile" in e57d7c|a45b7d) ;; *) echo 'Неверный профиль'; return 1;; esac
     case "$protocol" in dot|doh) ;; *) echo 'Неверный протокол'; return 1;; esac
     saved="$(mktemp)" || return 1
     old_doh="$(mktemp)" || { rm -f "$saved"; return 1; }
@@ -2371,7 +2371,7 @@ setup_nextdns() {
     _nextdns_status
     echo
     echo '1) Профиль e57d7c (основной)'
-    echo '2) Профиль 6c366c (второй)'
+    echo '2) Профиль a45b7d (второй)'
     echo '3) Отключить NextDNS'
     echo '4) Показать DNS-статус'
     echo '0) Назад'
@@ -2379,7 +2379,7 @@ setup_nextdns() {
     read -r -e -p 'Выбор [0-4]: ' choice
     case "$choice" in
         1) profile=e57d7c ;;
-        2) profile=6c366c ;;
+        2) profile=a45b7d ;;
         3) _nextdns_disable; return ;;
         4) _nextdns_status; resolvectl query example.com; return ;;
         0) return ;;
