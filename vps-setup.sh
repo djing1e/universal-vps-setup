@@ -1806,28 +1806,47 @@ _nextdns_doh_prepare() {
     fi
     # Try NextDNS documented anycast IPs first, then previously verified
     # hostname-resolved IPv4 endpoints. These are fallbacks, not permanent guarantees.
+    # First pass: strict 3/3; second pass: retry rejected endpoints, accept 2/3.
+    # The probe checks TLS and a valid DoH DNS answer, not just HTTP status.
     candidates='45.90.28.0 45.90.30.0 135.181.102.167 185.87.111.48'
-    for ip in $candidates; do
-        successes=0
-        for i in 1 2 3; do
-            if _nextdns_doh_probe "$profile" "$ip"; then
-                successes=$((successes+1))
+    local pass
+    for pass in 1 2; do
+        if [ "$pass" -eq 2 ]; then
+            [ "${#selected[@]}" -ge 2 ] && break
+            echo 'NextDNS DoH: повторно проверяю кандидатов для резервирования'
+            sleep 2
+        fi
+        for ip in $candidates; do
+            case " ${selected[*]} " in *" $ip "*) continue ;; esac
+            successes=0
+            for i in 1 2 3; do
+                if _nextdns_doh_probe "$profile" "$ip"; then
+                    successes=$((successes+1))
+                fi
+                if [ "$pass" -eq 1 ] && [ "$successes" -lt "$i" ]; then
+                    break
+                fi
+                [ "$i" -lt 3 ] && sleep 1
+            done
+            if { [ "$pass" -eq 1 ] && [ "$successes" -eq 3 ]; } ||
+               { [ "$pass" -eq 2 ] && [ "$successes" -ge 2 ]; }; then
+                selected+=("$ip")
+                echo "NextDNS DoH endpoint доступен ($successes/3, проход $pass): $ip"
+                [ "${#selected[@]}" -ge 2 ] && break
             else
-                break
+                echo "NextDNS DoH endpoint недоступен ($successes/3, проход $pass): $ip"
             fi
         done
-        if [ "$successes" -eq 3 ]; then
-            selected+=("$ip")
-            echo "NextDNS DoH endpoint доступен (3/3): $ip"
-            [ "${#selected[@]}" -ge 2 ] && break
-        else
-            echo "NextDNS DoH endpoint недоступен: $ip"
-        fi
+        [ "${#selected[@]}" -ge 2 ] && break
     done
     if [ "${#selected[@]}" -eq 0 ]; then
         echo 'Нет доступных NextDNS DoH endpoint; системный DNS не изменён'
         return 1
     fi
+    if [ "${#selected[@]}" -eq 1 ]; then
+        echo "ПРЕДУПРЕЖДЕНИЕ: только один доступный DoH endpoint (${selected[0]})" >&2
+    fi
+
     install -d -m 0755 /etc/nextdns-doh || return 1
     {
         printf '%s\n' "listen_addresses = ['127.0.0.1:5353']"
@@ -1854,6 +1873,11 @@ EOF_DOH
             printf "  [static.'nextdns-%s']\n  stamp = '%s'\n" "$i" "$stamp"
         done
     } > /etc/nextdns-doh/dnscrypt-proxy.toml || return 1
+    # Validate generated configuration before restarting the DNS service.
+    if ! "$dnscrypt_bin" -check -config /etc/nextdns-doh/dnscrypt-proxy.toml; then
+        echo 'ОШИБКА: проверка dnscrypt-proxy -check не пройдена' >&2
+        return 1
+    fi
     cat > /etc/systemd/system/nextdns-doh.service <<EOF_UNIT
 [Unit]
 Description=NextDNS DoH via dnscrypt-proxy
@@ -1879,15 +1903,21 @@ EOF_UNIT
         echo 'Не удалось запустить DoH-службу'; return 1
     fi
     systemctl restart nextdns-doh.service || return 1
-    for i in 1 2 3 4 5; do
-        if timeout 5 dig +time=2 +tries=1 @127.0.0.1 -p 5353 example.com A +short |
-            grep -Eq '^[0-9]+\.'; then
-            return 0
+    # Do not assume that 'active' means ready: wait for three DNS replies.
+    local good=0
+    for i in $(seq 1 15); do
+        if systemctl is-active --quiet nextdns-doh.service &&
+           timeout 5 dig +time=2 +tries=1 @127.0.0.1 -p 5353 example.com A +short 2>/dev/null |
+               grep -Eq '^[0-9]+\.'; then
+            good=$((good+1))
+            [ "$good" -ge 3 ] && return 0
+        else
+            good=0
         fi
         sleep 1
     done
-    echo 'DoH не отвечает на 127.0.0.1:5353'
-    journalctl -u nextdns-doh.service -n 15 --no-pager || true
+    echo 'ОШИБКА: DoH не дал трёх последовательных успешных DNS-ответов' >&2
+    journalctl -u nextdns-doh.service -n 20 --no-pager || true
     return 1
 }
 
