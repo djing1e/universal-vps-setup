@@ -3434,7 +3434,7 @@ rn_ask_params() {
     fi
   else
     RN_XHTTP_MODE=false
-    RN_MEM_LIMIT="1500m"
+    RN_MEM_LIMIT=""
     RN_OOM_THRESHOLD=80
   fi
 
@@ -3449,7 +3449,11 @@ rn_ask_params() {
   else
     echo -e "  Панель IP:   ${_RN_YELLOW}не задан — порт ${RN_NODE_PORT} открыт всем${_RN_RESET}"
   fi
-  echo -e "  mem_limit:   ${_RN_CYAN}${RN_MEM_LIMIT}${_RN_RESET}"
+  if [[ "$RN_XHTTP_MODE" == true ]]; then
+    echo -e "  mem_limit:   ${_RN_CYAN}${RN_MEM_LIMIT}${_RN_RESET}"
+  else
+    echo -e "  mem_limit:   ${_RN_YELLOW}без ограничений${_RN_RESET}"
+  fi
   if [[ "$RN_XHTTP_MODE" == true ]]; then
     echo -e "  OOM watcher: ${_RN_CYAN}включён, порог ${RN_OOM_THRESHOLD}%${_RN_RESET}"
   else
@@ -3464,60 +3468,50 @@ rn_ask_params() {
 }
 
 rn_install_docker() {
-  # Docker уже стоит?
-  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-    rn_success "Docker уже установлен ($(docker --version 2>/dev/null))"
-    return 0
-  fi
-
-  # Определяем дистрибутив
-  local os_id os_codename
-  os_id="$(. /etc/os-release 2>/dev/null; echo "${ID:-}")"
-  os_codename="$(. /etc/os-release 2>/dev/null; echo "${VERSION_CODENAME:-}")"
-
-  # ── Способ 1: docker.io из репо дистрибутива ──
-  # Работает на Debian (в т.ч. 13/trixie, где download.docker.com не имеет ветки)
-  # и на РФ-нодах (ставится с Яндекс-зеркала, а не с недоступного download.docker.com).
-  rn_info "Ставлю Docker из репозитория дистрибутива (docker.io)..."
-  apt-get update -qq 2>/dev/null
-  if apt-get install -y -qq docker.io docker-compose 2>/dev/null && command -v docker >/dev/null 2>&1; then
-    systemctl enable --now docker 2>/dev/null || true
-    sleep 2
-    if systemctl is-active --quiet docker; then
-      rn_success "Docker установлен из репо дистрибутива ($(docker --version 2>/dev/null))"
+  # Prefer distribution packages on RU nodes. Avoid adding an unreachable
+  # official repository when Debian's package transaction succeeds.
+  if command -v docker >/dev/null 2>&1; then
+    if systemctl enable --now docker.service >/dev/null 2>&1 &&
+       docker info >/dev/null 2>&1; then
+      rn_success "Docker доступен: $(docker --version)"
       return 0
     fi
   fi
 
-  # ── Способ 2: официальный репо Docker (для не-РФ, если docker.io не подошёл) ──
-  # ВАЖНО: правильный путь по дистрибутиву — /linux/debian для Debian, /linux/ubuntu для Ubuntu.
-  local docker_os="$os_id"
-  [[ "$docker_os" != "debian" && "$docker_os" != "ubuntu" ]] && docker_os="debian"
-  rn_info "Пробую официальный репозиторий Docker (/linux/${docker_os})..."
-  apt-get install -y -qq ca-certificates curl gnupg lsb-release 2>/dev/null
-  install -m 0755 -d /etc/apt/keyrings
-  if curl -fsSL --max-time 15 "https://download.docker.com/linux/${docker_os}/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null; then
-    chmod a+r /etc/apt/keyrings/docker.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${docker_os} ${os_codename} stable" \
-      > /etc/apt/sources.list.d/docker.list
-    apt-get update -qq 2>/dev/null
-    apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null
-    systemctl enable --now docker 2>/dev/null || true
-    sleep 2
-  else
-    rn_warn "download.docker.com недоступен (типично для РФ) — официальный репо пропущен."
+  rn_info "Устанавливаю docker.io + docker-compose из репозитория ОС..."
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-remove docker.io docker-compose; then
+    rn_error "APT не смог установить Docker; проверь apt-get и dpkg"
+    return 1
   fi
+  hash -r
+  if ! command -v docker >/dev/null 2>&1; then
+    rn_warn "docker.io установлен, но CLI docker отсутствует в PATH"
+    dpkg -L docker.io 2>/dev/null | grep '/docker$' || true
+    ls -l /usr/bin/docker /usr/local/bin/docker 2>/dev/null || true
+    dpkg --audit || true
+    rn_error "Docker CLI не найден — прекращаю установку ноды"
+    return 1
+  fi
+  if ! systemctl enable --now docker.service; then
+    journalctl -u docker.service -n 30 --no-pager || true
+    rn_error "Не удалось включить Docker service"
+    return 1
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    journalctl -u docker.service -n 30 --no-pager || true
+    rn_error "Docker daemon не отвечает"
+    return 1
+  fi
+  rn_success "Docker установлен: $(docker --version)"
+}
 
-  if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker; then
-    rn_success "Docker запущен ($(docker --version 2>/dev/null))"
-    # registry-зеркала для образов на РФ-нодах
-    if [[ ! -f /etc/docker/daemon.json ]]; then
-      mkdir -p /etc/docker
-      echo '{ "registry-mirrors": ["https://mirror.gcr.io", "https://dockerhub.timeweb.cloud"] }' > /etc/docker/daemon.json
-      systemctl restart docker 2>/dev/null || true
-    fi
+rn_compose() {
+  if docker compose version >/dev/null 2>&1; then
+    docker compose "$@"
+  elif command -v docker-compose >/dev/null 2>&1; then
+    docker-compose "$@"
   else
-    rn_error "Docker установить не удалось. Вручную: apt install docker.io docker-compose"
+    rn_error "Нет Docker Compose v2 (plugin или docker-compose)"
     return 1
   fi
 }
@@ -3542,45 +3536,27 @@ rn_fix_docker_socket() {
 
 rn_install_deps() {
   rn_info "Обновление пакетов и установка зависимостей..."
-  apt-get update -qq
-
-  local pkgs=()
-  command -v logrotate &>/dev/null || pkgs+=(logrotate)
-  if (( ${#pkgs[@]} > 0 )); then
-    apt-get install -y -qq "${pkgs[@]}"
+  apt-get update -qq || { rn_error "APT update завершился ошибкой"; return 1; }
+  if ! command -v logrotate >/dev/null 2>&1; then
+    apt-get install -y --no-remove logrotate || return 1
   fi
-
-  # Проверяем docker
-  if ! command -v docker &>/dev/null; then
-    rn_info "Docker не найден — устанавливаю..."
-    rn_install_docker
+  if ! command -v docker >/dev/null 2>&1; then
+    rn_install_docker || return 1
   else
-    rn_success "Docker уже установлен: $(docker --version)"
-    # Проверяем что daemon реально работает
     rn_fix_docker_socket || return 1
   fi
-
-  # Проверяем compose plugin
-  if ! docker compose version &>/dev/null 2>&1; then
-    rn_info "docker compose plugin не найден — устанавливаю..."
-    # Сначала пробуем из стандартного репо
-    if apt-get install -y -qq docker-compose-plugin 2>/dev/null; then
-      rn_success "docker-compose-plugin установлен из apt"
-    else
-      # Если не вышло — переустанавливаем Docker через официальный репо
-      rn_warn "docker-compose-plugin не найден в apt — переустанавливаю Docker из официального репо..."
-      rn_install_docker
-    fi
-    # Финальная проверка
-    if docker compose version &>/dev/null 2>&1; then
-      rn_success "docker compose: $(docker compose version)"
-    else
-      rn_error "docker compose plugin не удалось установить. Установи вручную: https://docs.docker.com/compose/install/"
-      return 1
-    fi
-  else
-    rn_success "docker compose: $(docker compose version)"
+  if ! docker info >/dev/null 2>&1; then
+    rn_error "Docker daemon не работает"; return 1
   fi
+  if ! rn_compose version >/dev/null 2>&1; then
+    # Debian/Ubuntu distribution Compose v2 package can expose docker-compose
+    # rather than 'docker compose'. No Docker CE repo fallback on RU nodes.
+    apt-get install -y --no-remove docker-compose || return 1
+    rn_compose version >/dev/null 2>&1 || {
+      rn_error "Docker Compose v2 недоступен"; return 1;
+    }
+  fi
+  rn_success "Compose: $(rn_compose version)"
 }
 
 rn_prepare_dirs() {
@@ -3786,8 +3762,6 @@ services:
     hostname: remnanode
     image: remnawave/node:${RN_NODE_VERSION}
     network_mode: host
-    mem_limit: ${RN_MEM_LIMIT}
-    memswap_limit: ${RN_MEM_LIMIT}
     restart: always
     cap_add:
       - NET_ADMIN
@@ -3869,6 +3843,25 @@ volumes:
   caddy_config:
     name: caddy_config
 EOF
+  fi
+  # Insert limits only when the user explicitly opted into the OOM watcher.
+  if [[ "$RN_XHTTP_MODE" == true ]]; then
+    RN_COMPOSE_FILE="${RN_INSTALL_DIR}/docker-compose.yml" RN_COMPOSE_MEM_LIMIT="$RN_MEM_LIMIT" python3 - <<'PY_RN_MEM'
+import os
+from pathlib import Path
+path = Path(os.environ["RN_COMPOSE_FILE"])
+content = path.read_text()
+anchor = "  remnanode:\n    container_name: remnanode\n"
+if content.count(anchor) != 1:
+    raise SystemExit("ERROR: remnanode service anchor not found exactly once")
+limit = os.environ["RN_COMPOSE_MEM_LIMIT"]
+content = content.replace(anchor, anchor + f"    mem_limit: {limit}\n    memswap_limit: {limit}\n", 1)
+path.write_text(content)
+PY_RN_MEM
+    if [[ $? -ne 0 ]]; then
+      rn_error "Не удалось применить mem_limit к Compose"
+      return 1
+    fi
   fi
   rn_success "docker-compose.yml создан"
 }
@@ -3958,25 +3951,27 @@ rn_open_panel_port() {
 }
 
 rn_start_services() {
-  cd "${RN_INSTALL_DIR}"
+  cd "${RN_INSTALL_DIR}" || return 1
+  rn_compose config -q || { rn_error "Compose config невалиден"; return 1; }
   if [[ "$RN_CF_MODE" == true ]]; then
-    rn_info "Собираю кастомный образ Caddy с плагином cloudflare (xcaddy build)..."
-    rn_info "Это займёт 1-3 минуты..."
-    docker compose build caddy
-    rn_info "Скачиваю образ remnanode..."
-    docker compose pull remnanode
+    rn_info "Собираю Caddy с Cloudflare DNS Challenge..."
+    rn_compose build caddy || return 1
+    rn_compose pull remnanode || return 1
   else
-    rn_info "Скачиваю образы (docker compose pull)..."
-    docker compose pull
+    rn_info "Скачиваю образы..."
+    rn_compose pull || return 1
   fi
-  rn_info "Запускаю контейнеры (docker compose up -d)..."
-  docker compose up -d
-  rn_success "Контейнеры запущены"
-  echo ""
-  echo -e "${_RN_YELLOW}  Слежу за логами — нажми Ctrl+C чтобы выйти${_RN_RESET}"
-  echo ""
-  sleep 1
-  docker compose logs -f || true
+  rn_info "Запускаю контейнеры..."
+  rn_compose up -d || { rn_error "Docker Compose up завершился ошибкой"; return 1; }
+  local service
+  for service in remnanode caddy; do
+    if [[ -z "$(rn_compose ps -q "$service")" ]]; then
+      rn_error "Контейнер $service не создан"; return 1
+    fi
+  done
+  rn_success "Контейнеры созданы и запуск выполнен"
+  rn_compose ps || true
+  echo "Логи: cd ${RN_INSTALL_DIR} && docker compose logs -f (или docker-compose logs -f)"
 }
 
 rn_print_summary() {
@@ -5080,7 +5075,7 @@ setup_remnanode_builtin() {
     rn_choose_install_dir || return
     rn_ask_params         || return
     rn_ask_cloudflare
-    rn_install_deps
+    rn_install_deps || { rn_error "Установка остановлена: Docker/Compose недоступен"; return 1; }
     rn_prepare_dirs
     rn_create_stub
     rn_create_dockerfile
@@ -5089,7 +5084,7 @@ setup_remnanode_builtin() {
     rn_setup_oom_watcher
     rn_setup_logrotate
     rn_open_panel_port
-    rn_start_services
+    rn_start_services || { rn_error "Установка остановлена: контейнеры не запущены"; return 1; }
     rn_print_summary
 }
 
