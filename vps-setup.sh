@@ -1708,7 +1708,8 @@ _nextdns_status() {
     else
         echo 'NextDNS: системная конфигурация (управляемый drop-in отсутствует)'
     fi
-    echo "DoH service: $(systemctl is-active nextdns-doh.service 2>/dev/null || true)"
+    echo "Managed DoH service: $(systemctl is-active nextdns-doh.service 2>/dev/null || true)"
+    echo "External Cloudflare DoH: $(systemctl is-active cloudflare-doh.service 2>/dev/null || true)"
     if systemctl is-active --quiet nextdns-doh.service; then
         echo 'DoH listener:'
         ss -H -lntup 2>/dev/null | grep -F '127.0.0.1:5353' || true
@@ -1718,15 +1719,16 @@ _nextdns_status() {
 }
 
 _nextdns_doh_stamp() {
-    # DNS stamp: DoH, selected IPv4, TLS hostname=dns.nextdns.io, path=/PROFILE.
+    # Provider-specific DoH stamps with pinned IPv4 and validated TLS hostname.
     python3 - "$1" "$2" <<'PY_STAMP'
 import base64,ipaddress,sys
 profile,ip=sys.argv[1:]
-assert profile in ('e57d7c','a45b7d')
+assert profile in ('e57d7c','a45b7d','cloudflare')
 ipaddress.IPv4Address(ip)
 def lp(v):
     v=v.encode('ascii'); assert len(v)<128; return bytes([len(v)])+v
-payload=b'\x02'+bytes(8)+lp(ip)+b'\x00'+lp('dns.nextdns.io')+lp('/'+profile)
+host,path=('cloudflare-dns.com','/dns-query') if profile=='cloudflare' else ('dns.nextdns.io','/'+profile)
+payload=b'\x02'+bytes(8)+lp(ip)+b'\x00'+lp(host)+lp(path)
 print('sdns://'+base64.urlsafe_b64encode(payload).decode().rstrip('='))
 PY_STAMP
 }
@@ -1734,10 +1736,17 @@ PY_STAMP
 _nextdns_doh_probe() {
     # Verify real profile-specific DoH response with TLS validation and pinned IP.
     local profile="$1" ip="$2" result
+    local host url
+    if [ "$profile" = cloudflare ]; then
+        host=cloudflare-dns.com
+        url='https://cloudflare-dns.com/dns-query?name=example.com&type=A'
+    else
+        host=dns.nextdns.io
+        url="https://dns.nextdns.io/${profile}?name=example.com&type=A"
+    fi
     result="$(curl -4 -fsS --noproxy '*' --connect-timeout 4 --max-time 8 \
-        --resolve "dns.nextdns.io:443:$ip" \
-        -H 'Accept: application/dns-json' \
-        "https://dns.nextdns.io/${profile}?name=example.com&type=A" 2>/dev/null)" || return 1
+        --resolve "$host:443:$ip" \
+        -H 'Accept: application/dns-json' "$url" 2>/dev/null)" || return 1
     printf '%s' "$result" | python3 -c '
 import json,sys
 try:
@@ -1808,7 +1817,11 @@ _nextdns_doh_prepare() {
     # hostname-resolved IPv4 endpoints. These are fallbacks, not permanent guarantees.
     # First pass: strict 3/3; second pass: retry rejected endpoints, accept 2/3.
     # The probe checks TLS and a valid DoH DNS answer, not just HTTP status.
-    candidates='45.90.28.0 45.90.30.0 135.181.102.167 185.87.111.48'
+    if [ "$profile" = cloudflare ]; then
+        candidates='1.1.1.1 1.0.0.1'
+    else
+        candidates='45.90.28.0 45.90.30.0 135.181.102.167 185.87.111.48'
+    fi
     local pass
     for pass in 1 2; do
         if [ "$pass" -eq 2 ]; then
@@ -1850,6 +1863,8 @@ _nextdns_doh_prepare() {
     install -d -m 0755 /etc/nextdns-doh || return 1
     {
         printf '%s\n' "listen_addresses = ['127.0.0.1:5353']"
+        printf '%s\n' 'max_clients = 1000' '
+cache = true' 'cache_size = 4096'
         printf 'server_names = ['
         for i in "${!selected[@]}"; do
             [ "$i" -gt 0 ] && printf ', '
@@ -1925,6 +1940,12 @@ _nextdns_verify() {
     local protocol="$1" expected_profile="${2:-}" result
     resolvectl flush-caches >/dev/null 2>&1 || true
     timeout 12 resolvectl query example.com >/dev/null 2>&1 || return 1
+    if [ "$expected_profile" = cloudflare ]; then
+        # Ensure both the encrypted local proxy and the system resolver are live.
+        timeout 5 dig +time=2 +tries=1 @127.0.0.1 -p 5353 cloudflare.com A +short 2>/dev/null |
+            grep -Eq '^[0-9]+\.' || return 1
+        return 0
+    fi
     result="$(curl -4 -fsSL --connect-timeout 5 --max-time 15 \
         https://test.nextdns.io/ 2>/dev/null)" || return 1
     # NextDNS can return an opaque fp... identifier instead of the six-character
@@ -2203,7 +2224,17 @@ _nextdns_apply() {
     local conf=/etc/systemd/resolved.conf.d/nextdns.conf
     local dohconf=/etc/nextdns-doh/dnscrypt-proxy.toml
     local saved old_doh tmp previous=0 had_doh=0 was_doh_active=0 net_snapshot
-    case "$profile" in e57d7c|a45b7d) ;; *) echo 'Неверный профиль'; return 1;; esac
+    case "$profile" in e57d7c|a45b7d|cloudflare) ;; *) echo 'Неверный профиль'; return 1;; esac
+    if [ "$profile" = cloudflare ] && [ "$protocol" != doh ]; then
+        echo 'Cloudflare поддерживается только через DoH'; return 1
+    fi
+    # Do not interfere with a separately installed, manually managed DoH service.
+    if systemctl is-active --quiet cloudflare-doh.service ||
+       [ -f /etc/systemd/resolved.conf.d/90-cloudflare-doh.conf ]; then
+        echo 'Обнаружена ручная конфигурация cloudflare-doh.service. Автомиграция запрещена.' >&2
+        echo 'Текущая DNS-конфигурация не изменена.' >&2
+        return 1
+    fi
     case "$protocol" in dot|doh) ;; *) echo 'Неверный протокол'; return 1;; esac
     saved="$(mktemp)" || return 1
     old_doh="$(mktemp)" || { rm -f "$saved"; return 1; }
@@ -2334,7 +2365,7 @@ EOF_RES
     if [ "$protocol" = dot ]; then
         systemctl disable --now nextdns-doh.service >/dev/null 2>&1 || true
     fi
-    echo "NextDNS $profile через ${protocol^^} настроен"
+    echo "DNS $profile через ${protocol^^} настроен"
     _nextdns_status
 }
 
@@ -2397,21 +2428,23 @@ _nextdns_disable() {
 
 setup_nextdns() {
     print_header
-    echo '=== Настройка NextDNS ==='
+    echo '=== Настройка DNS (NextDNS / Cloudflare) ==='
     _nextdns_status
     echo
     echo '1) Профиль e57d7c (основной)'
     echo '2) Профиль a45b7d (второй)'
-    echo '3) Отключить NextDNS'
-    echo '4) Показать DNS-статус'
+    echo '3) Cloudflare DoH (1.1.1.1 / 1.0.0.1)'
+    echo '4) Отключить управляемый DNS'
+    echo '5) Показать DNS-статус'
     echo '0) Назад'
     local choice profile proto
-    read -r -e -p 'Выбор [0-4]: ' choice
+    read -r -e -p 'Выбор [0-5]: ' choice
     case "$choice" in
         1) profile=e57d7c ;;
         2) profile=a45b7d ;;
-        3) _nextdns_disable; return ;;
-        4) _nextdns_status; resolvectl query example.com; return ;;
+        3) _nextdns_apply cloudflare doh; return ;;
+        4) _nextdns_disable; return ;;
+        5) _nextdns_status; resolvectl query example.com; return ;;
         0) return ;;
         *) echo 'Неверный выбор'; return 1 ;;
     esac
