@@ -3468,32 +3468,30 @@ rn_ask_params() {
 }
 
 rn_install_docker() {
-  # Prefer distribution packages on RU nodes. Avoid adding an unreachable
-  # official repository when Debian's package transaction succeeds.
-  if command -v docker >/dev/null 2>&1; then
-    if systemctl enable --now docker.service >/dev/null 2>&1 &&
-       docker info >/dev/null 2>&1; then
-      rn_success "Docker доступен: $(docker --version)"
-      return 0
-    fi
+  # Prefer distribution packages; Docker Hub / download.docker.com can be
+  # unreachable on RU VPS. Debian 13 provides docker-cli separately.
+  if command -v docker >/dev/null 2>&1 &&
+     systemctl enable --now docker.service >/dev/null 2>&1 &&
+     docker info >/dev/null 2>&1; then
+    rn_success "Docker доступен: $(docker --version)"
+    return 0
   fi
 
   rn_info "Устанавливаю Docker Engine, CLI и Compose из репозитория ОС..."
   local docker_packages=(docker.io docker-compose)
-  # Debian 13 splits the Docker CLI (/usr/bin/docker) into docker-cli.
-  # Ubuntu and older Debian releases may still bundle it with docker.io.
-  if apt-cache show docker-cli 2>/dev/null | grep -q '^Package: docker-cli
+  if apt-cache show docker-cli 2>/dev/null | grep -q '^Package: docker-cli$'; then
+    docker_packages+=(docker-cli)
+  fi
+
+  if ! apt-get install -y --no-remove "${docker_packages[@]}"; then
     rn_error "APT не смог установить Docker; проверь apt-get и dpkg"
     return 1
   fi
+
   hash -r
   if ! command -v docker >/dev/null 2>&1; then
-    rn_warn "Docker Engine установлен, но CLI отсутствует; проверяю отдельный пакет docker-cli"
-    if apt-cache show docker-cli 2>/dev/null | grep -q '^Package: docker-cli
-    dpkg -L docker.io 2>/dev/null | grep '/docker$' || true
-    ls -l /usr/bin/docker /usr/local/bin/docker 2>/dev/null || true
+    rn_error "Docker CLI отсутствует после установки пакетов"
     dpkg --audit || true
-    rn_error "Docker CLI не найден — прекращаю установку ноды"
     return 1
   fi
   if ! systemctl enable --now docker.service; then
