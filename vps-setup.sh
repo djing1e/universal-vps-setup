@@ -284,7 +284,11 @@ for pair in "4 inet $STAGE4 $TARGET4" "6 inet6 $STAGE6 $TARGET6"; do
 done
 
 # Capture the previous persisted state before changing live sets.
-cp -a /etc/ipset.conf "$WORK/ipset.conf.previous"
+if [[ -f /etc/ipset.conf ]]; then
+    cp -a /etc/ipset.conf "$WORK/ipset.conf.previous"
+else
+    log 'INFO: /etc/ipset.conf absent; first-run persistence will be created'
+fi
 
 ipset swap "$STAGE4" "$TARGET4"
 SWAP4=1
@@ -299,7 +303,9 @@ done
 [[ $(grep -c '^create ' "$WORK/ipset.conf") -ge 2 ]]
 chmod 600 "$WORK/ipset.conf"
 # Same filesystem for atomic rename; keep the old file as a recovery copy.
-cp -a /etc/ipset.conf /etc/ipset.conf.pre-blocklist-update
+if [[ -f /etc/ipset.conf ]]; then
+    cp -a /etc/ipset.conf /etc/ipset.conf.pre-blocklist-update
+fi
 PERSIST_TMP=$(mktemp /etc/.ipset.conf.XXXXXXXX)
 install -m 600 "$WORK/ipset.conf" "$PERSIST_TMP"
 mv -f "$PERSIST_TMP" /etc/ipset.conf
