@@ -1863,8 +1863,7 @@ _nextdns_doh_prepare() {
     install -d -m 0755 /etc/nextdns-doh || return 1
     {
         printf '%s\n' "listen_addresses = ['127.0.0.1:5353']"
-        printf '%s\n' 'max_clients = 1000' '
-cache = true' 'cache_size = 4096'
+        printf '%s\n' 'max_clients = 1000' 'cache = true' 'cache_size = 4096'
         printf 'server_names = ['
         for i in "${!selected[@]}"; do
             [ "$i" -gt 0 ] && printf ', '
@@ -2389,6 +2388,11 @@ _nextdns_rollback() {
 
 _nextdns_disable() {
     local conf=/etc/systemd/resolved.conf.d/nextdns.conf
+    if systemctl is-active --quiet cloudflare-doh.service ||
+       [ -f /etc/systemd/resolved.conf.d/90-cloudflare-doh.conf ]; then
+        echo 'Обнаружен вручную установленный Cloudflare DoH; не изменяю его.' >&2
+        return 1
+    fi
     local saved had_conf=0 net_snapshot
     saved="$(mktemp)" || return 1
     net_snapshot="$(mktemp -d)" || { rm -f "$saved"; return 1; }
