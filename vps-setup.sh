@@ -3821,8 +3821,6 @@ services:
     hostname: remnanode
     image: remnawave/node:${RN_NODE_VERSION}
     network_mode: host
-    mem_limit: ${RN_MEM_LIMIT}
-    memswap_limit: ${RN_MEM_LIMIT}
     restart: always
     cap_add:
       - NET_ADMIN
