@@ -190,26 +190,49 @@ def record_behavior_incidents(results, now):
         for result in results:
             user = result["user"]
             for reason in result["reasons"]:
-                # Deduplicate by subscription, rule, and event time rather than
-                # the scheduled run time. Never inflate observations on rescans.
-                peak = result.get("windows_seconds", {}).get("ssh_90s_peak", {})
-                evidence = peak.get("start_utc") if reason == "ssh_90s_burst" else None
-                try:
-                    event_time = dt.datetime.fromisoformat(evidence).timestamp() if evidence else now
-                except (ValueError, TypeError):
-                    event_time = now
-                existing = next((item for item in reversed(data)
-                                 if item.get("user") == user and item.get("reason") == reason
-                                 and isinstance(item.get("last_seen_epoch"), (int, float))
-                                 and 0 <= event_time - item["last_seen_epoch"] < 1800), None)
-                if existing:
-                    # Same episode: do not extend cooldown or increase counter.
+                evidence = result.get("evidence", {}).get(reason)
+                if not evidence:
+                    # Do not synthesize incident timestamps from scan time.
                     continue
-                data.append({"user": user, "reason": reason,
-                             "first_seen_epoch": event_time,
-                             "last_seen_epoch": event_time,
-                             "observations": 1, "status": "SUSPICIOUS",
-                             "action": "observe"})
+                start = evidence["start_epoch"]
+                end = evidence["end_epoch"]
+                if not (isinstance(start, (int, float)) and
+                        isinstance(end, (int, float)) and start <= end <= now + 60):
+                    continue
+                # Stable for unchanged evidence. Do not use timer/scan timestamp.
+                key = json.dumps([user, reason, start, end], separators=(",", ":"))
+                incident_id = hashlib.sha256(key.encode()).hexdigest()[:24]
+                if any(item.get("incident_id") == incident_id for item in data):
+                    continue
+                # Backward compatibility: preserve legacy records untouched,
+                # avoid adding duplicate evidence for the same old episode.
+                # Old timestamps were scan times, so allow a 30m correlation.
+                legacy = any(
+                    item.get("incident_id") is None
+                    and item.get("user") == user and item.get("reason") == reason
+                    and isinstance(item.get("first_seen_epoch"), (int, float))
+                    and isinstance(item.get("last_seen_epoch"), (int, float))
+                    and item["first_seen_epoch"] <= end + 1800
+                    and item["last_seen_epoch"] >= start - 1800
+                    for item in data)
+                if legacy:
+                    continue
+                # If the same episode grows slightly, coalesce overlapping
+                # evidence without refreshing observations.
+                same_episode = next((item for item in data
+                    if item.get("incident_id") is not None
+                    and item.get("user") == user and item.get("reason") == reason
+                    and isinstance(item.get("evidence_start_epoch"), (int, float))
+                    and isinstance(item.get("evidence_end_epoch"), (int, float))
+                    and start <= item["evidence_end_epoch"] + 90
+                    and end >= item["evidence_start_epoch"] - 90), None)
+                if same_episode:
+                    continue
+                data.append({"incident_id": incident_id, "user": user,
+                             "reason": reason, "evidence_start_epoch": start,
+                             "evidence_end_epoch": end, "first_seen_epoch": end,
+                             "last_seen_epoch": end, "observations": 1,
+                             "status": "SUSPICIOUS", "action": "observe"})
         # Bounded history, fixed size; most recently updated incidents first.
         data = sorted(data, key=lambda item: item["last_seen_epoch"])[-1000:]
         import tempfile
@@ -252,6 +275,7 @@ def behavior(record=False):
     latest = max((r[0] for r in all_records), default=None)
     domain_activity = defaultdict(lambda: {w: [] for w in windows})
     ssh_timeline = defaultdict(list)
+    nonweb_timeline = defaultdict(list)
     for stamp, proto, dest, port, user, route in all_records:
         age = now - stamp
         if age < -60 or age > max(windows):
@@ -283,6 +307,8 @@ def behavior(record=False):
             continue
         if proto == "tcp" and parsed_port == 22:
             ssh_timeline[user].append((stamp, host))
+        if parsed_port not in (80, 443, 853):
+            nonweb_timeline[user].append((stamp, proto, host, parsed_port))
         for window in windows:
             if age <= window:
                 activity[user][window].append((proto, host, parsed_port))
@@ -293,6 +319,7 @@ def behavior(record=False):
         measures = {}
         suspicious = False
         reasons = []
+        evidence = {}
         for window in windows:
             events = per_window[window]
             domain_events = domain_activity[user][window]
@@ -316,12 +343,18 @@ def behavior(record=False):
             if window == 300 and len(nonweb) >= 50 and len(nonweb_ips) >= 20 and len(nonweb_ports) >= 8:
                 suspicious = True
                 reasons.append("five_minute_nonweb_fanout")
+                sample = [v for v in nonweb_timeline[user] if now - v[0] <= window]
+                evidence["five_minute_nonweb_fanout"] = {"start_epoch": min(v[0] for v in sample), "end_epoch": max(v[0] for v in sample)}
             if window == 1800 and len(ssh_ips) >= 15 and len(nonweb) >= 30:
                 suspicious = True
                 reasons.append("ssh_multi_destination")
+                sample = [v for v in ssh_timeline[user] if now - v[0] <= window]
+                evidence["ssh_multi_destination"] = {"start_epoch": min(v[0] for v in sample), "end_epoch": max(v[0] for v in sample)}
             if window == 1800 and len(nonweb_ips) >= 75 and len(nonweb_ports) >= 12:
                 suspicious = True
                 reasons.append("thirty_minute_nonweb_fanout")
+                sample = [v for v in nonweb_timeline[user] if now - v[0] <= window]
+                evidence["thirty_minute_nonweb_fanout"] = {"start_epoch": min(v[0] for v in sample), "end_epoch": max(v[0] for v in sample)}
         # Sliding 90-second window anchored to event times, not the scan time.
         ssh_events = sorted(ssh_timeline[user])
         left = 0
@@ -346,11 +379,13 @@ def behavior(record=False):
         if peak["unique_ips"] >= 12:
             suspicious = True
             reasons.append("ssh_90s_burst")
+            evidence["ssh_90s_burst"] = {"start_epoch": dt.datetime.fromisoformat(peak["start_utc"]).timestamp(), "end_epoch": dt.datetime.fromisoformat(peak["end_utc"]).timestamp()}
         if suspicious:
             results.append({
                 "user": user,
                 "status": "SUSPICIOUS",
                 "reasons": reasons,
+                "evidence": evidence,
                 "windows_seconds": measures,
                 "action": "observe",
             })
