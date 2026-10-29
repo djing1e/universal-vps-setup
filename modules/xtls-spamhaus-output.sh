@@ -130,6 +130,22 @@ PY
   cat "$d"/*.batch > "$d/all.batch"
   nft -c -f "$d/all.batch"
   nft -f "$d/all.batch"
+  # Explicit restore verification; a successful nft exit alone is not enough.
+  local ver expected actual
+  for ver in 4 6; do
+    [[ -s "$ROOT/cidr$ver" ]] || continue
+    expected=$(wc -l < "$ROOT/cidr$ver")
+    actual=$(nft -j list set inet "$TABLE" "v$ver" | python3 -c '
+import json,sys
+obj=json.load(sys.stdin)
+print(sum(len(e["set"].get("elem",[])) for e in obj["nftables"] if "set" in e))
+')
+    echo "Restore IPv$ver: cached=$expected nft_elements=$actual"
+    [[ "$actual" =~ ^[0-9]+$ && "$actual" -gt 0 ]] || {
+      echo "ERROR: IPv$ver nft set is empty after restore" >&2
+      return 1
+    }
+  done
 }
 status() {
   nft list table inet "$TABLE" 2>/dev/null || echo "Not installed"
