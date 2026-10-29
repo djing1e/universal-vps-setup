@@ -9691,6 +9691,37 @@ setup_auto_abuse_guard() {
     rm -f "$installer"
 }
 
+setup_smtp25_guard() {
+    local choice f
+    f=$(mktemp /tmp/xtls-smtp25.XXXXXX.sh) || return 1
+    chmod 700 "$f"
+    if ! curl -fsSL --connect-timeout 10 --max-time 40 "https://raw.githubusercontent.com/djing1e/universal-vps-setup/feature/auto-abuse-guard-observe-20261029/modules/xtls-smtp25-guard.sh" -o "$f"; then
+        rm -f "$f"; echo "Ошибка загрузки SMTP25 Guard"; return 1
+    fi
+    if ! bash -n "$f"; then rm -f "$f"; return 1; fi
+    while true; do
+        echo "=== SMTP25 Anti-Abuse (исходящий TCP/25) ==="
+        echo "1) Установить (Observe по умолчанию)"
+        echo "2) Статус и счётчики"
+        echo "3) Observe (без блокировок)"
+        echo "4) Блокировать только исходящий TCP/25 (явное подтверждение)"
+        echo "5) Отключить защиту"
+        echo "0) Назад"
+        read -e -r -p "Выбор: " choice || break
+        case "$choice" in
+            1) bash "$f" install ;;
+            2) if [[ -x /usr/local/sbin/xtls-smtp25-guard ]]; then /usr/local/sbin/xtls-smtp25-guard status; else echo "Не установлен"; fi ;;
+            3) if [[ -x /usr/local/sbin/xtls-smtp25-guard ]]; then /usr/local/sbin/xtls-smtp25-guard observe; else echo "Сначала установите"; fi ;;
+            4) read -e -r -p "Введите BLOCK-SMTP25 для подтверждения: " confirm
+               if [[ "$confirm" == "BLOCK-SMTP25" ]]; then /usr/local/sbin/xtls-smtp25-guard block; else echo "Отменено"; fi ;;
+            5) if [[ -x /usr/local/sbin/xtls-smtp25-guard ]]; then /usr/local/sbin/xtls-smtp25-guard disable; else echo "Не установлен"; fi ;;
+            0) break ;;
+            *) echo "Неверный выбор" ;;
+        esac
+    done
+    rm -f "$f"
+}
+
 setup_antiabuse_center() {
     local choice
     while true; do
@@ -9702,8 +9733,9 @@ setup_antiabuse_center() {
         echo "  4) Общий статус (только чтение)"
         echo "  5) Spamhaus OUTPUT Observe (без DROP)"
         echo "  6) Auto Abuse Guard (Observe)"
+        echo "  7) SMTP25 Guard (опциональная исходящая защита)"
         echo "  0) Назад"
-        read -e -r -p "Выберите [0-6]: " choice || return 0
+        read -e -r -p "Выберите [0-7]: " choice || return 0
         case "$choice" in
             1) setup_threat_blocklist ;;
             2) setup_c2_feed ;;
@@ -9711,6 +9743,7 @@ setup_antiabuse_center() {
             4) antiabuse_center_status ;;
             5) setup_spamhaus_out_observe ;;
             6) setup_auto_abuse_guard ;;
+            7) setup_smtp25_guard ;;
             0) return 0 ;;
             *) echo "Неверный выбор" ;;
         esac
