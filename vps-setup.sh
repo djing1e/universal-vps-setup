@@ -9661,6 +9661,36 @@ setup_spamhaus_out_observe() {
     return "$rc"
 }
 
+setup_auto_abuse_guard() {
+    local choice installer
+    installer=$(mktemp /tmp/xtls-auto-guard.XXXXXX.sh) || return 1
+    chmod 700 "$installer"
+    if ! curl -fsSL --connect-timeout 10 --max-time 40 "https://raw.githubusercontent.com/djing1e/universal-vps-setup/feature/auto-abuse-guard-observe-20261029/modules/xtls-auto-abuse-guard-install.sh" -o "$installer"; then
+        rm -f "$installer"
+        echo "Не удалось загрузить установщик Auto Abuse Guard"
+        return 1
+    fi
+    if ! bash -n "$installer"; then rm -f "$installer"; return 1; fi
+    while true; do
+        echo "=== Auto Abuse Guard (только Observe, без блокировок) ==="
+        echo "1) Установить / включить таймер"
+        echo "2) Статус / последние наблюдения"
+        echo "3) Выполнить сканирование сейчас"
+        echo "4) Отключить и удалить сервис (логи сохранить)"
+        echo "0) Назад"
+        read -e -r -p "Выбор: " choice || break
+        case "$choice" in
+            1) bash "$installer" install ;;
+            2) bash "$installer" status ;;
+            3) if [[ -x /usr/local/sbin/xtls-auto-abuse-guard ]]; then /usr/bin/python3 /usr/local/sbin/xtls-auto-abuse-guard scan; else echo "Сначала установите модуль"; fi ;;
+            4) bash "$installer" remove ;;
+            0) break ;;
+            *) echo "Неверный выбор" ;;
+        esac
+    done
+    rm -f "$installer"
+}
+
 setup_antiabuse_center() {
     local choice
     while true; do
@@ -9671,14 +9701,16 @@ setup_antiabuse_center() {
         echo "  3) UDP Anti-Abuse (OUTPUT)"
         echo "  4) Общий статус (только чтение)"
         echo "  5) Spamhaus OUTPUT Observe (без DROP)"
+        echo "  6) Auto Abuse Guard (Observe)"
         echo "  0) Назад"
-        read -e -r -p "Выберите [0-5]: " choice || return 0
+        read -e -r -p "Выберите [0-6]: " choice || return 0
         case "$choice" in
             1) setup_threat_blocklist ;;
             2) setup_c2_feed ;;
             3) setup_udp_abuse ;;
             4) antiabuse_center_status ;;
             5) setup_spamhaus_out_observe ;;
+            6) setup_auto_abuse_guard ;;
             0) return 0 ;;
             *) echo "Неверный выбор" ;;
         esac
