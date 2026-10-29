@@ -40,9 +40,15 @@ with batch.open('w') as f:
         f.write('add element ip xtls_c2_feed c2_pairs { '+', '.join(f'{ip} . {port}' for ip,port in pairs[i:i+500])+' }\n')
 print('Validated pairs:',len(pairs))
 PY
- prepare
- nft -c -f "$tmp/batch"
- nft -f "$tmp/batch"
+ local rc=$?
+ if (( rc != 0 )); then
+   echo "ERROR: C2 feed validation failed (exit $rc); existing nft set unchanged" >&2
+   return "$rc"
+ fi
+ [[ -s "$tmp/batch" && -s "$tmp/validated" ]] || { echo 'ERROR: missing validated feed or nft batch' >&2; return 1; }
+ prepare || return 1
+ nft -c -f "$tmp/batch" || return 1
+ nft -f "$tmp/batch" || return 1
 }
 remove_rules() {
  local h
