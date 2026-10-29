@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-SCRIPT_URL="https://raw.githubusercontent.com/djing1e/universal-vps-setup/b3eb5fc22fc705e255d10d378b19067737c4624b/modules/xtls-auto-abuse-guard.py"
+SCRIPT_URL="https://raw.githubusercontent.com/djing1e/universal-vps-setup/5f7e6ed977d48054ca01f38a152900f48896aa54/modules/xtls-auto-abuse-guard.py"
 TARGET=/usr/local/sbin/xtls-auto-abuse-guard
 SERVICE=/etc/systemd/system/xtls-auto-abuse-guard.service
 TIMER=/etc/systemd/system/xtls-auto-abuse-guard.timer
@@ -15,7 +15,14 @@ install_guard() {
   trap 'rm -f "$tmp"' RETURN
   curl -fsSL --connect-timeout 10 --max-time 40 "$SCRIPT_URL" -o "$tmp"
   python3 -m py_compile "$tmp"
+  grep -q 'incident_id' "$tmp" || { echo "Incident ID support missing" >&2; return 1; }
   grep -q 'behavior-record' "$tmp" || { echo "Behavior support missing" >&2; return 1; }
+  local backup_dir
+  backup_dir=$(mktemp -d /root/xtls-guard-backup.XXXXXXXX)
+  [[ ! -f "$TARGET" ]] || cp -a "$TARGET" "$backup_dir/xtls-auto-abuse-guard"
+  [[ ! -f "$SERVICE" ]] || cp -a "$SERVICE" "$backup_dir/xtls-auto-abuse-guard.service"
+  [[ ! -f "$TIMER" ]] || cp -a "$TIMER" "$backup_dir/xtls-auto-abuse-guard.timer"
+  echo "Previous version backed up to: $backup_dir"
   install -o root -g root -m 0755 "$tmp" "$TARGET"
   cat > "$SERVICE" <<'UNIT'
 [Unit]
