@@ -22,14 +22,14 @@ check_dropins() {
   done < <(find "$DROPIN_DIR" -maxdepth 1 -type f -name "*.conf" -print0)
 }
 require_root() { if (( EUID != 0 )); then echo "Run as root" >&2; exit 1; fi; }
-install_guard() {
+install_guard() (
   require_root
   command -v python3 >/dev/null
   command -v journalctl >/dev/null
   command -v curl >/dev/null
   local tmp
   tmp=$(mktemp)
-  trap 'rm -f "$tmp"' RETURN
+  trap 'rm -f "$tmp"' EXIT
   curl -fsSL --connect-timeout 10 --max-time 40 "$SCRIPT_URL" -o "$tmp"
   python3 -m py_compile "$tmp"
   grep -q 'incident_id' "$tmp" || { echo "Incident ID support missing" >&2; return 1; }
@@ -42,6 +42,33 @@ install_guard() {
   [[ ! -f "$TIMER" ]] || cp -a "$TIMER" "$backup_dir/xtls-auto-abuse-guard.timer"
   [[ ! -d "$DROPIN_DIR" ]] || cp -a "$DROPIN_DIR" "$backup_dir/dropins"
   echo "Previous version backed up to: $backup_dir"
+  local was_enabled=no was_active=no committed=no
+  systemctl is-enabled --quiet xtls-auto-abuse-guard.timer && was_enabled=yes || true
+  systemctl is-active --quiet xtls-auto-abuse-guard.timer && was_active=yes || true
+  rollback() {
+    local rc=$?
+    if [[ "$committed" != yes && $rc -ne 0 ]]; then
+      echo "Update failed (exit=$rc); restoring unit files and executable" >&2
+      if [[ -e "$backup_dir/xtls-auto-abuse-guard" ]]; then
+        cp -a "$backup_dir/xtls-auto-abuse-guard" "$TARGET"
+      else rm -f "$TARGET"; fi
+      if [[ -e "$backup_dir/xtls-auto-abuse-guard.service" ]]; then
+        cp -a "$backup_dir/xtls-auto-abuse-guard.service" "$SERVICE"
+      else rm -f "$SERVICE"; fi
+      if [[ -e "$backup_dir/xtls-auto-abuse-guard.timer" ]]; then
+        cp -a "$backup_dir/xtls-auto-abuse-guard.timer" "$TIMER"
+      else rm -f "$TIMER"; fi
+      rm -rf "$DROPIN_DIR"
+      if [[ -d "$backup_dir/dropins" ]]; then cp -a "$backup_dir/dropins" "$DROPIN_DIR"; fi
+      systemctl daemon-reload || true
+      if [[ "$was_enabled" == yes ]]; then systemctl enable xtls-auto-abuse-guard.timer || true
+      else systemctl disable xtls-auto-abuse-guard.timer || true; fi
+      if [[ "$was_active" == yes ]]; then systemctl start xtls-auto-abuse-guard.timer || true
+      else systemctl stop xtls-auto-abuse-guard.timer || true; fi
+      echo "Rollback attempted; backup: $backup_dir" >&2
+    fi
+  }
+  trap rollback EXIT
   install -o root -g root -m 0755 "$tmp" "$TARGET"
   cat > "$SERVICE" <<'UNIT'
 [Unit]
@@ -93,8 +120,11 @@ UNIT
   systemctl daemon-reload
   systemd-analyze verify "$SERVICE"
   systemctl enable --now xtls-auto-abuse-guard.timer
+  systemctl start xtls-auto-abuse-guard.service
+  systemctl is-active --quiet xtls-auto-abuse-guard.timer
+  committed=yes
   echo "Installed: observe-only timer. No firewall or user bans."
-}
+)
 status_guard() {
   systemctl status --no-pager --lines=8 xtls-auto-abuse-guard.timer || true
   systemctl status --no-pager --lines=8 xtls-auto-abuse-guard.service || true
