@@ -150,6 +150,40 @@ print(sum(len(e["set"].get("elem",[])) for e in obj["nftables"] if "set" in e))
     }
   done
 )
+diagnostics_enable() {
+  prepare
+  # Rate limits are per-rule (not per destination). Log only outbound matches;
+  # no drop, no NFLOG daemon, no payload capture.
+  if ! nft list chain inet "$TABLE" output | grep -q 'xtls-sh-diag-v4'; then
+    nft add rule inet "$TABLE" output ip daddr @v4 limit rate 2/minute burst 5 packets log prefix '"XTLS-SH4 "' level notice comment '"xtls-sh-diag-v4"'
+  fi
+  if ! nft list chain inet "$TABLE" output | grep -q 'xtls-sh-diag-v6'; then
+    nft add rule inet "$TABLE" output ip6 daddr @v6 limit rate 2/minute burst 5 packets log prefix '"XTLS-SH6 "' level notice comment '"xtls-sh-diag-v6"'
+  fi
+  install -d -m 700 "$ROOT"
+  echo enabled > "$ROOT/diagnostics-mode"
+  echo "Spamhaus matched-packet logging enabled (2/minute per family, burst 5; no DROP)"
+}
+diagnostics_disable() {
+  local handle
+  for marker in xtls-sh-diag-v4 xtls-sh-diag-v6; do
+    while :; do
+      handle=$(nft -a list chain inet "$TABLE" output 2>/dev/null |
+        awk -v marker="$marker" 'index($0,marker){for(i=1;i<=NF;i++)if($i=="handle"){print $(i+1);exit}}')
+      [[ -n "$handle" ]] || break
+      nft delete rule inet "$TABLE" output handle "$handle"
+    done
+  done
+  install -d -m 700 "$ROOT"
+  echo disabled > "$ROOT/diagnostics-mode"
+  echo "Spamhaus matched-packet logging disabled"
+}
+diagnostics_show() {
+  echo "Recent Spamhaus OUTPUT log events (kernel journal):"
+  journalctl -k --since "2 hours ago" --no-pager -o short-iso 2>/dev/null |
+    grep -E 'XTLS-SH[46] ' | tail -n 60 || true
+  echo "Note: capped logging samples packets, not complete connection counts."
+}
 status() {
   nft list table inet "$TABLE" 2>/dev/null || echo "Not installed"
   echo "Last successful update: $(cat "$ROOT/last-success" 2>/dev/null || echo none)"
@@ -159,5 +193,8 @@ case "${1:-}" in
   update) update ;;
   restore) restore ;;
   status) status ;;
-  *) echo "Usage: xtls-spamhaus-output {install|update|restore|status}" >&2;exit 2 ;;
+  diagnostics-enable) diagnostics_enable ;;
+  diagnostics-disable) diagnostics_disable ;;
+  diagnostics-show) diagnostics_show ;;
+  *) echo "Usage: xtls-spamhaus-output {install|update|restore|status|diagnostics-enable|diagnostics-disable|diagnostics-show}" >&2;exit 2 ;;
 esac
