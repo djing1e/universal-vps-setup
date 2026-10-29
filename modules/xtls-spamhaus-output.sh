@@ -15,13 +15,13 @@ prepare() {
   nft list chain inet "$TABLE" output | grep -q 'xtls-sh-out-v4' || nft add rule inet "$TABLE" output ip daddr @v4 counter comment '"xtls-sh-out-v4"'
   nft list chain inet "$TABLE" output | grep -q 'xtls-sh-out-v6' || nft add rule inet "$TABLE" output ip6 daddr @v6 counter comment '"xtls-sh-out-v6"'
 }
-update() {
+update() (
   install -d -m 700 "$ROOT"
   exec 9>"$LOCK"
   flock -x 9
   local d
   d=$(mktemp -d /tmp/xtls-spamhaus-out.XXXXXXXX)
-  trap 'rm -rf "${d:-}"' RETURN
+  trap 'rm -rf "$d"' EXIT
   curl -fsSL --retry 2 --connect-timeout 10 --max-time 90 "$URL4" -o "$d/v4"
   curl -fsSL --retry 2 --connect-timeout 10 --max-time 90 "$URL6" -o "$d/v6"
   python3 - "$d" <<'PY'
@@ -57,7 +57,7 @@ PY
   install -m 600 "$d/cidr6" "$ROOT/cidr6"
   printf '%s\n' "$(date -u '+%FT%TZ')" > "$ROOT/last-success"
   echo "Spamhaus OUTPUT observation updated (no DROP)"
-}
+)
 install_module() {
   command -v nft >/dev/null || { echo 'nft is required' >&2; return 1; }
   command -v python3 >/dev/null || { echo 'python3 is required' >&2; return 1; }
@@ -102,11 +102,11 @@ UNIT
   systemctl daemon-reload
   systemctl enable xtls-spamhaus-output-restore.service xtls-spamhaus-output-update.timer
 }
-restore() {
+restore() (
   prepare
   local d
   d=$(mktemp -d /tmp/xtls-spamhaus-restore.XXXXXXXX)
-  trap 'rm -rf "${d:-}"' RETURN
+  trap 'rm -rf "$d"' EXIT
   local ver
   for ver in 4 6; do
     if [[ ! -s "$ROOT/cidr$ver" ]]; then
@@ -148,7 +148,7 @@ print(sum(len(e["set"].get("elem",[])) for e in obj["nftables"] if "set" in e))
       return 1
     }
   done
-}
+)
 status() {
   nft list table inet "$TABLE" 2>/dev/null || echo "Not installed"
   echo "Last successful update: $(cat "$ROOT/last-success" 2>/dev/null || echo none)"
