@@ -108,8 +108,9 @@ remove_guard() {
   echo "Removed service and timer; observation data preserved."
 }
 case "${1:-}" in
+  preflight) require_root; check_dropins; echo "Drop-in preflight OK" ;;
   install) install_guard ;;
   status) status_guard ;;
   remove) remove_guard ;;
-  *) echo "Usage: $0 {install|status|remove}"; exit 2 ;;
+  *) echo "Usage: $0 {preflight|install|status|remove}"; exit 2 ;;
 esac
