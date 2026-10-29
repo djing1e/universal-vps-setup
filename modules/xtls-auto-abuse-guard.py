@@ -45,7 +45,7 @@ def read_recent_access():
     return records
 
 def get_events(cursor):
-    cmd = ["journalctl", "-k", "--no-pager", "-o", "json", "--grep", "XTLS-SH[46] ", "-n", str(MAX_EVENTS)]
+    cmd = ["journalctl", "-k", "--no-pager", "-o", "json", "--grep", "XTLS-SH[46] ", "-n", "+" + str(MAX_EVENTS)]
     if cursor:
         cmd += ["--after-cursor", cursor]
     else:
@@ -103,7 +103,7 @@ def scan():
             print("No new Spamhaus OUTPUT events")
             return
         if len(events) >= MAX_EVENTS:
-            print("WARNING: journal event batch reached limit; check for missed events before enabling enforcement")
+            print("INFO: journal batch full; next scan resumes from saved cursor (no newest-only skipping)")
         records = read_recent_access()
         out = []
         for ecursor, stamp, dst, proto, port in events:
