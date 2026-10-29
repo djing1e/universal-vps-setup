@@ -9220,7 +9220,7 @@ load() {
   local tmp count
   [[ -f "$CSV" ]] || { echo 'No confirmed UDP feed; monitoring only'; return 0; }
   tmp=$(mktemp -d)
-  python3 - "$CSV" "$tmp/batch" <<'PY'
+  python3 - "$CSV" "$tmp/batch" <<'PY' || { rm -rf "$tmp"; return 1; }
 import csv,ipaddress,pathlib,sys
 src=pathlib.Path(sys.argv[1])
 out=pathlib.Path(sys.argv[2])
@@ -9284,12 +9284,12 @@ enable_block() {
   local h
   h=$(udp_drop_handle)
   [[ -n "$h" ]] || nft add rule ip "$TABLE" output ip daddr . udp dport @udp_pairs counter drop comment '"xtls-udp-block"'
-  printf 'block\\n' > "$ROOT/mode"
+  printf '%s\n' block > "$ROOT/mode"
   echo 'UDP DROP active'
 }
 disable_block() {
   local h
-  printf 'observe\\n' > "$ROOT/mode"
+  printf '%s\n' observe > "$ROOT/mode"
   h=$(udp_drop_handle)
   [[ -z "$h" ]] || nft delete rule ip "$TABLE" output handle "$h"
   echo 'UDP DROP disabled'
