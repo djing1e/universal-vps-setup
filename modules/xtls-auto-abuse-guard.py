@@ -16,7 +16,7 @@ ACCESS = Path("/var/log/remnanode/access.log")
 MAX_EVENTS = 100
 MAX_ACCESS_BYTES = 2 * 1024 * 1024
 WINDOW_SEC = 3
-EVENT_RE = re.compile(r"\bDST=(\S+).*?\bPROTO=(TCP|UDP)\b.*?\bDPT=(\d+)\b")
+EVENT_RE = re.compile(r"\bSRC=(\S+).*?\bDST=(\S+).*?\bPROTO=(TCP|UDP)\b.*?\bSPT=(\d+)\b.*?\bDPT=(\d+)\b")
 ACCESS_RE = re.compile(r"^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d)\.\d+ .*? accepted (tcp|udp):(\S+) \[([^]]+)\] email: (\S+)")
 
 def read_recent_access():
@@ -70,7 +70,7 @@ def get_events(cursor):
             if not m:
                 continue
             stamp = int(item["__REALTIME_TIMESTAMP"]) / 1_000_000
-            events.append((item.get("__CURSOR"), stamp, m.group(1), m.group(2).lower(), m.group(3)))
+            events.append((item.get("__CURSOR"), stamp, m.group(2), m.group(3).lower(), m.group(5), m.group(1), m.group(4)))
         except (ValueError, KeyError, TypeError):
             continue
     return events
@@ -106,7 +106,12 @@ def scan():
             print("INFO: journal batch full; next scan resumes from saved cursor (no newest-only skipping)")
         records = read_recent_access()
         out = []
-        for ecursor, stamp, dst, proto, port in events:
+        seen_flows = set()
+        for ecursor, stamp, dst, proto, port, src, sport in events:
+            flow = (src, sport, dst, port, proto, int(stamp // 60))
+            if flow in seen_flows:
+                continue
+            seen_flows.add(flow)
             matches = {(user, route) for t, p, addr, dport, user, route in records
                        if abs(t - stamp) <= WINDOW_SEC and p == proto and addr == dst and dport == port}
             record = {"time_utc": dt.datetime.fromtimestamp(stamp, dt.timezone.utc).isoformat(),
@@ -134,7 +139,7 @@ def scan():
             temporary = STATE / "cursor.tmp"
             temporary.write_text(lastcursor + "\n")
             temporary.replace(statefile)
-        print(f"Observed {len(events)} logged packets; unique user matches: {sum(x['status']=='matched' for x in out)}; bans: 0")
+        print(f"Observed {len(events)} logged packets; {len(out)} distinct flows (within minute buckets); unique user matches: {sum(x['status']=='matched' for x in out)}; bans: 0")
 
 def report():
     file = STATE / "detections.jsonl"
