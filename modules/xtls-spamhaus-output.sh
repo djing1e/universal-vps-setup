@@ -210,9 +210,9 @@ for line in journal.splitlines():
     if 'XTLS-SH4 ' not in line and 'XTLS-SH6 ' not in line:
         continue
     ts=parse_time(line.split(' ',1)[0])
-    dst=re.search(r'\\bDST=([^ ]+)',line)
-    proto=re.search(r'\\bPROTO=(TCP|UDP)\\b',line)
-    port=re.search(r'\\bDPT=(\\d+)\\b',line)
+    dst=re.search(r'\bDST=([^ ]+)',line)
+    proto=re.search(r'\bPROTO=(TCP|UDP)\b',line)
+    port=re.search(r'\bDPT=(\d+)\b',line)
     if ts is None or not dst or not proto or not port: continue
     events.append((ts,dst.group(1),proto.group(1).lower(),port.group(1)))
 events=events[-LIMIT_EVENTS:]
@@ -240,7 +240,7 @@ def cidr_for(ip):
 records=[]
 if ACCESS.is_file():
     content=run(['tail','-n',str(LIMIT_ACCESS),str(ACCESS)])
-    pattern=re.compile(r'^(\\d{4}/\\d\\d/\\d\\d \\d\\d:\\d\\d:\\d\\d)\\.\\d+ .*? accepted (tcp|udp):([^ ]+) \\[([^]]+)\\] email: (\\S+)')
+    pattern=re.compile(r'^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d)\.\d+ .*? accepted (tcp|udp):([^ ]+) \[([^]]+)\] email: (\S+)')
     for line in content.splitlines():
         m=pattern.search(line)
         if not m: continue
@@ -259,7 +259,7 @@ for t,ip,proto,port in events:
 for (ip,proto,port),(t,count) in list(unique.items())[-25:]:
     moment=dt.datetime.fromtimestamp(t,dt.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
     candidates={(r[4],r[5]) for r in records if abs(r[0]-t)<=WINDOW and r[1]==ip and r[2]==proto and r[3]==port}
-    print(f'\\n{moment}  {proto.upper()} {ip}:{port}  packets_sampled={count}  range={cidr_for(ip)}')
+    print(f'\n{moment}  {proto.upper()} {ip}:{port}  packets_sampled={count}  range={cidr_for(ip)}')
     if len(candidates)==1:
         user,route=next(iter(candidates))
         print(f'  Remnanode candidate: email={user} route={route} (time/destination match; not proof)')
