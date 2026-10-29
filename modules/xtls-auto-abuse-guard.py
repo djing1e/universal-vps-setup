@@ -166,6 +166,85 @@ def scan():
             temporary.replace(statefile)
         print(f"Observed {len(events)} logged packets; {len(out)} distinct flows (10-minute dedup window); unique user matches: {sum(x['status']=='matched' for x in out)}; bans: 0")
 
+
+def behavior():
+    """Bounded subscription-level heuristics from Xray access logs; observation only."""
+    from collections import defaultdict
+    import ipaddress
+
+    now = dt.datetime.now(dt.timezone.utc).timestamp()
+    windows = (300, 1800)
+    activity = defaultdict(lambda: {w: [] for w in windows})
+    invalid = 0
+    for stamp, proto, dest, port, user, route in read_recent_access():
+        age = now - stamp
+        if age < -60 or age > max(windows):
+            continue
+        try:
+            parsed_port = int(port)
+            host = dest.strip("[]")
+            ip = ipaddress.ip_address(host)
+            if not ip.is_global or not 1 <= parsed_port <= 65535:
+                continue
+        except ValueError:
+            invalid += 1
+            continue
+        for window in windows:
+            if age <= window:
+                activity[user][window].append((proto, host, parsed_port))
+
+    results = []
+    for user, per_window in sorted(activity.items()):
+        measures = {}
+        suspicious = False
+        reasons = []
+        for window in windows:
+            events = per_window[window]
+            destinations = {(proto, host, port) for proto, host, port in events}
+            nonweb = [(proto, host, port) for proto, host, port in events
+                      if port not in (80, 443, 853)]
+            nonweb_ips = {host for _, host, _ in nonweb}
+            nonweb_ports = {port for _, _, port in nonweb}
+            ssh_ips = {host for proto, host, port in nonweb if proto == "tcp" and port == 22}
+            measures[str(window)] = {
+                "connections": len(events),
+                "unique_destinations": len(destinations),
+                "nonweb_connections": len(nonweb),
+                "nonweb_ips": len(nonweb_ips),
+                "nonweb_ports": len(nonweb_ports),
+                "ssh_ips": len(ssh_ips),
+            }
+            # Conservative indicators; these are signals for human review, never proof.
+            if window == 300 and len(nonweb) >= 50 and len(nonweb_ips) >= 20 and len(nonweb_ports) >= 8:
+                suspicious = True
+                reasons.append("five_minute_nonweb_fanout")
+            if window == 1800 and len(ssh_ips) >= 15 and len(nonweb) >= 30:
+                suspicious = True
+                reasons.append("ssh_multi_destination")
+            if window == 1800 and len(nonweb_ips) >= 75 and len(nonweb_ports) >= 12:
+                suspicious = True
+                reasons.append("thirty_minute_nonweb_fanout")
+        if suspicious:
+            results.append({
+                "user": user,
+                "status": "SUSPICIOUS",
+                "reasons": reasons,
+                "windows_seconds": measures,
+                "action": "observe",
+            })
+    print(json.dumps({
+        "time_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "source": str(ACCESS),
+        "max_access_bytes": MAX_ACCESS_BYTES,
+        "window_seconds": list(windows),
+        "subscriptions_seen": len(activity),
+        "suspected": results,
+        "skipped_invalid_destinations": invalid,
+        "attribution": "access_log_email",
+        "action": "observe",
+        "note": "No bans. Only bounded log tail is analyzed; incomplete evidence is possible.",
+    }, ensure_ascii=False, separators=(",", ":")))
+
 def report():
     file = STATE / "detections.jsonl"
     if not file.exists():
@@ -182,9 +261,11 @@ def report():
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action", choices=["scan", "report"])
+    p.add_argument("action", choices=["scan", "report", "behavior"])
     args = p.parse_args()
     if args.action == "scan":
         scan()
+    elif args.action == "behavior":
+        behavior()
     else:
         report()
