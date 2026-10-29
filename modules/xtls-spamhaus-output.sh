@@ -53,6 +53,8 @@ PY
   prepare
   nft -c -f "$d/batch"
   nft -f "$d/batch"
+  install -m 600 "$d/cidr4" "$ROOT/cidr4"
+  install -m 600 "$d/cidr6" "$ROOT/cidr6"
   printf '%s\n' "$(date -u '+%FT%TZ')" > "$ROOT/last-success"
   echo "Spamhaus OUTPUT observation updated (no DROP)"
 }
@@ -124,7 +126,8 @@ for i in range(0,len(nets),100):
 PY
     } > "$d/v$ver.batch"
   done
-  cat "$d"/*.batch > "$d/all.batch" 2>/dev/null || return 0
+  if ! compgen -G "$d/*.batch" >/dev/null; then return 0; fi
+  cat "$d"/*.batch > "$d/all.batch"
   nft -c -f "$d/all.batch"
   nft -f "$d/all.batch"
 }
