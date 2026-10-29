@@ -16,8 +16,8 @@ ACCESS = Path("/var/log/remnanode/access.log")
 MAX_EVENTS = 100
 MAX_ACCESS_BYTES = 2 * 1024 * 1024
 WINDOW_SEC = 3
-EVENT_RE = re.compile(r"\\bDST=(\\S+).*?\\bPROTO=(TCP|UDP)\\b.*?\\bDPT=(\\d+)\\b")
-ACCESS_RE = re.compile(r"^(\\d{4}/\\d\\d/\\d\\d \\d\\d:\\d\\d:\\d\\d)\\.\\d+ .*? accepted (tcp|udp):(\\S+) \\[([^]]+)\\] email: (\\S+)")
+EVENT_RE = re.compile(r"\bDST=(\S+).*?\bPROTO=(TCP|UDP)\b.*?\bDPT=(\d+)\b")
+ACCESS_RE = re.compile(r"^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d)\.\d+ .*? accepted (tcp|udp):(\S+) \[([^]]+)\] email: (\S+)")
 
 def read_recent_access():
     if not ACCESS.is_file():
