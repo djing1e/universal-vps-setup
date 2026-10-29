@@ -4,10 +4,14 @@ on:
   push:
     paths:
       - 'vps-setup.sh'
+      - 'modules/xtls-c2-feed.sh'
+      - 'tests/**'
       - '.github/workflows/bash-syntax.yml'
   pull_request:
     paths:
       - 'vps-setup.sh'
+      - 'modules/xtls-c2-feed.sh'
+      - 'tests/**'
       - '.github/workflows/bash-syntax.yml'
   workflow_dispatch:
 
@@ -25,4 +29,11 @@ jobs:
         shell: bash
         run: |
           bash -n vps-setup.sh
+          bash -n modules/xtls-c2-feed.sh
           echo 'Bash syntax OK'
+      - name: C2 offline regression tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Install nftables for isolated kernel tests
+        run: sudo apt-get update && sudo apt-get install -y nftables
+      - name: C2 real nftables regression tests in a network namespace
+        run: sudo python3 tests/check_c2_real_nft.py
