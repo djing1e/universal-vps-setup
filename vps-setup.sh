@@ -3468,8 +3468,6 @@ rn_ask_params() {
 }
 
 rn_install_docker() {
-  # Prefer distribution packages on RU nodes. Avoid adding an unreachable
-  # official repository when Debian's package transaction succeeds.
   if command -v docker >/dev/null 2>&1; then
     if systemctl enable --now docker.service >/dev/null 2>&1 &&
        docker info >/dev/null 2>&1; then
@@ -3480,16 +3478,22 @@ rn_install_docker() {
 
   rn_info "Устанавливаю Docker Engine, CLI и Compose из репозитория ОС..."
   local docker_packages=(docker.io docker-compose)
-  # Debian 13 splits the Docker CLI (/usr/bin/docker) into docker-cli.
-  # Ubuntu and older Debian releases may still bundle it with docker.io.
-  if apt-cache show docker-cli 2>/dev/null | grep -q '^Package: docker-cli
+  # Debian 13: Docker CLI may be packaged separately.
+  if apt-cache show docker-cli 2>/dev/null | grep -q '^Package: docker-cli$'; then
+    docker_packages+=(docker-cli)
+  fi
+  if ! apt-get install -y --no-remove "${docker_packages[@]}"; then
     rn_error "APT не смог установить Docker; проверь apt-get и dpkg"
     return 1
   fi
   hash -r
   if ! command -v docker >/dev/null 2>&1; then
     rn_warn "Docker Engine установлен, но CLI отсутствует; проверяю отдельный пакет docker-cli"
-    if apt-cache show docker-cli 2>/dev/null | grep -q '^Package: docker-cli
+    if apt-cache show docker-cli 2>/dev/null | grep -q '^Package: docker-cli$'; then
+      apt-get install -y --no-remove docker-cli || true
+    fi
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
     dpkg -L docker.io 2>/dev/null | grep '/docker$' || true
     ls -l /usr/bin/docker /usr/local/bin/docker 2>/dev/null || true
     dpkg --audit || true
