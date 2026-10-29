@@ -96,9 +96,11 @@ Unit=xtls-spamhaus-output-update.service
 [Install]
 WantedBy=timers.target
 UNIT
+  # Validate and populate the observer before enabling boot/timer units.
+  # Failed downloads must not leave an enabled but empty installation.
+  update
   systemctl daemon-reload
   systemctl enable xtls-spamhaus-output-restore.service xtls-spamhaus-output-update.timer
-  update
 }
 restore() {
   prepare
