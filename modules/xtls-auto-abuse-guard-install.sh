@@ -4,6 +4,23 @@ SCRIPT_URL="https://raw.githubusercontent.com/djing1e/universal-vps-setup/5f7e6e
 TARGET=/usr/local/sbin/xtls-auto-abuse-guard
 SERVICE=/etc/systemd/system/xtls-auto-abuse-guard.service
 TIMER=/etc/systemd/system/xtls-auto-abuse-guard.timer
+DROPIN_DIR=/etc/systemd/system/xtls-auto-abuse-guard.service.d
+LEGACY_DROPIN=$DROPIN_DIR/20-behavior.conf
+legacy_dropin_matches() {
+  [[ -f "$LEGACY_DROPIN" ]] || return 1
+  [[ "$(cat "$LEGACY_DROPIN")" == "$(printf "%s\n" "[Service]" "ExecStart=" "ExecStart=/usr/bin/python3 /usr/local/sbin/xtls-auto-abuse-guard scan" "ExecStart=/usr/bin/python3 /usr/local/sbin/xtls-auto-abuse-guard behavior-record")" ]]
+}
+check_dropins() {
+  local f
+  [[ -d "$DROPIN_DIR" ]] || return 0
+  while IFS= read -r -d "" f; do
+    if grep -Eq "^[[:space:]]*ExecStart[[:space:]]*=" "$f"; then
+      if [[ "$f" == "$LEGACY_DROPIN" ]] && legacy_dropin_matches; then continue; fi
+      echo "Unknown ExecStart override: $f; refusing update" >&2
+      return 1
+    fi
+  done < <(find "$DROPIN_DIR" -maxdepth 1 -type f -name "*.conf" -print0)
+}
 require_root() { if (( EUID != 0 )); then echo "Run as root" >&2; exit 1; fi; }
 install_guard() {
   require_root
@@ -17,11 +34,13 @@ install_guard() {
   python3 -m py_compile "$tmp"
   grep -q 'incident_id' "$tmp" || { echo "Incident ID support missing" >&2; return 1; }
   grep -q 'behavior-record' "$tmp" || { echo "Behavior support missing" >&2; return 1; }
+  check_dropins
   local backup_dir
   backup_dir=$(mktemp -d /root/xtls-guard-backup.XXXXXXXX)
   [[ ! -f "$TARGET" ]] || cp -a "$TARGET" "$backup_dir/xtls-auto-abuse-guard"
   [[ ! -f "$SERVICE" ]] || cp -a "$SERVICE" "$backup_dir/xtls-auto-abuse-guard.service"
   [[ ! -f "$TIMER" ]] || cp -a "$TIMER" "$backup_dir/xtls-auto-abuse-guard.timer"
+  [[ ! -d "$DROPIN_DIR" ]] || cp -a "$DROPIN_DIR" "$backup_dir/dropins"
   echo "Previous version backed up to: $backup_dir"
   install -o root -g root -m 0755 "$tmp" "$TARGET"
   cat > "$SERVICE" <<'UNIT'
@@ -70,7 +89,9 @@ Unit=xtls-auto-abuse-guard.service
 [Install]
 WantedBy=timers.target
 UNIT
+  if legacy_dropin_matches; then rm -f "$LEGACY_DROPIN"; fi
   systemctl daemon-reload
+  systemd-analyze verify "$SERVICE"
   systemctl enable --now xtls-auto-abuse-guard.timer
   echo "Installed: observe-only timer. No firewall or user bans."
 }
