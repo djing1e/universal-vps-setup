@@ -9530,7 +9530,7 @@ ROOT=Path(sys.argv[1])
 ACCESS=Path('/var/log/remnanode/access.log')
 LIMIT_EVENTS=60
 LIMIT_JOURNAL=3000
-LIMIT_ACCESS=20000
+LIMIT_ACCESS=100000
 WINDOW=3.0
 def run(cmd):
     try:
