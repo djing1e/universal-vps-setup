@@ -9003,7 +9003,7 @@ setup_c2_feed() {
     echo "  4) Включить блокировку TCP (риск ложных срабатываний)"
     echo "  5) Отключить блокировку TCP"
     echo "  0) Назад"
-    read -r -p "Выбор: " choice
+    read -e -r -p "Выбор: " choice
     case "$choice" in
         1) bash "$file" install || rc=$? ;;
         2) bash "$file" status || rc=$? ;;
