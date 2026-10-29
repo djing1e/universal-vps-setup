@@ -12,40 +12,47 @@ status() {
   echo "Configured mode: $(cat "$STATE_FILE" 2>/dev/null || echo absent)"
   if nft list table inet "$TABLE" >/dev/null 2>&1; then nft -a list table inet "$TABLE"; else echo "nft table: absent"; fi
 }
-restore() {
+apply_mode() {
   need_root; need_tools
-  local mode
-  mode=$(cat "$STATE_FILE" 2>/dev/null || echo disabled)
-  case "$mode" in observe|block|disabled) ;; *) echo "Invalid saved mode: $mode" >&2; exit 1 ;; esac
-  # Do not alter unrelated tables, and do not silently replace unknown table state.
-  if nft list table inet "$TABLE" >/dev/null 2>&1; then
-    nft delete table inet "$TABLE"
-  fi
-  if [[ "$mode" == disabled ]]; then return; fi
-  local tmp
+  local mode=${1:?mode required} tmp
+  case "$mode" in observe|block|disabled) ;; *) echo "Invalid mode: $mode" >&2; return 1 ;; esac
   tmp=$(mktemp /tmp/xtls-smtp25.XXXXXX)
-  trap 'rm -f "$tmp"' RETURN
+  # Build one transactional nft batch: if parsing or execution fails,
+  # existing rules stay intact. Do not modify unrelated tables.
   {
-    echo "add table inet $TABLE"
-    echo "add chain inet $TABLE out { type filter hook output priority -17; policy accept; }"
-    if [[ "$mode" == observe ]]; then
-      echo 'add rule inet xtls_smtp25_guard out meta l4proto tcp tcp dport 25 ct state new counter limit rate 2/minute burst 4 packets log prefix "XTLS-SMTP25 " level notice'
-    else
-      echo 'add rule inet xtls_smtp25_guard out meta l4proto tcp tcp dport 25 counter reject with tcp reset'
+    if nft list table inet "$TABLE" >/dev/null 2>&1; then
+      echo "delete table inet $TABLE"
+    fi
+    if [[ "$mode" != disabled ]]; then
+      echo "add table inet $TABLE"
+      echo "add chain inet $TABLE out { type filter hook output priority -17; policy accept; }"
+      if [[ "$mode" == observe ]]; then
+        echo 'add rule inet xtls_smtp25_guard out meta l4proto tcp tcp dport 25 ct state new counter limit rate 2/minute burst 4 packets log prefix "XTLS-SMTP25 " level notice'
+      else
+        echo 'add rule inet xtls_smtp25_guard out meta l4proto tcp tcp dport 25 counter reject with tcp reset'
+      fi
     fi
   } > "$tmp"
-  nft -c -f "$tmp"
-  nft -f "$tmp"
+  if ! nft -c -f "$tmp"; then rm -f "$tmp"; return 1; fi
+  if ! nft -f "$tmp"; then rm -f "$tmp"; return 1; fi
+  rm -f "$tmp"
   echo "SMTP/25 guard mode: $mode (only OUTPUT TCP/25; 465/587 untouched)"
+}
+restore() {
+  local mode
+  mode=$(cat "$STATE_FILE" 2>/dev/null || echo disabled)
+  apply_mode "$mode"
 }
 set_mode() {
   need_root; need_tools
   local mode=$1
+  case "$mode" in observe|block|disabled) ;; *) return 1 ;; esac
+  # Persist new mode only after successful nft transaction.
+  apply_mode "$mode"
   mkdir -p -m 700 "$STATE_DIR"
   printf '%s\n' "$mode" > "$STATE_FILE.new"
   chmod 600 "$STATE_FILE.new"
   mv "$STATE_FILE.new" "$STATE_FILE"
-  restore
 }
 install_service() {
   need_root
