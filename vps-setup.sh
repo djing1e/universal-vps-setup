@@ -8973,16 +8973,26 @@ fi
 
 # Optional C2 IP:port feed, independent of CrowdSec and existing firewall.
 setup_c2_feed() {
-    local file choice rc=0
+    local file choice rc=0 token
     file=$(mktemp) || return 1
-    if ! curl -fsSL --retry 2 --connect-timeout 10 --max-time 60 \
-        https://raw.githubusercontent.com/djing1e/universal-vps-setup/main/modules/xtls-c2-feed.sh -o "$file"; then
+    chmod 600 "$file"
+    if [[ -x /usr/local/sbin/xtls-c2-feed ]]; then
+        cp /usr/local/sbin/xtls-c2-feed "$file" || { rm -f "$file"; return 1; }
+    else
+        echo "Репозиторий приватный. Для первой загрузки нужен GitHub token (Contents: Read)."
+        read -r -s -p "GitHub token: " token
+        echo
         if ! curl -fsSL --retry 2 --connect-timeout 10 --max-time 60 \
-            https://cdn.jsdelivr.net/gh/djing1e/universal-vps-setup@main/modules/xtls-c2-feed.sh -o "$file"; then
+            -H "Authorization: Bearer $token" \
+            -H "Accept: application/vnd.github.raw+json" \
+            "https://api.github.com/repos/djing1e/universal-vps-setup/contents/modules/xtls-c2-feed.sh?ref=main" \
+            -o "$file"; then
+            unset token
             rm -f "$file"
-            echo "Ошибка загрузки модуля C2"
+            echo "Ошибка загрузки модуля C2 через GitHub API"
             return 1
         fi
+        unset token
     fi
     if ! bash -n "$file"; then rm -f "$file"; return 1; fi
     echo "  1) Установить обновляемый C2 IP:port feed (без блокировки)"
