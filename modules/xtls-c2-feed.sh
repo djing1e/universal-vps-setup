@@ -68,8 +68,8 @@ restore_locked() {
  fi
  echo "Restored. Mode: $m"
 }
-restore() { lock; restore_locked; }
-update() {
+restore() ( lock; restore_locked; )
+update() (
  lock
  install -d -m 700 "$ROOT"
  local tmp
@@ -89,7 +89,7 @@ update() {
    nft add rule ip "$TABLE" output ip daddr . tcp dport @c2_pairs counter drop comment '"xtls-c2-block"'
  fi
  echo "Updated. Mode: $(mode)"
-}
+)
 install_module() {
  install -d -m 700 "$ROOT"
  install -m 755 "$0" /usr/local/sbin/xtls-c2-feed
