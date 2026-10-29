@@ -21,7 +21,7 @@ update() {
   flock -x 9
   local d
   d=$(mktemp -d /tmp/xtls-spamhaus-out.XXXXXXXX)
-  trap 'rm -rf "$d"' RETURN
+  trap 'rm -rf "${d:-}"' RETURN
   curl -fsSL --retry 2 --connect-timeout 10 --max-time 90 "$URL4" -o "$d/v4"
   curl -fsSL --retry 2 --connect-timeout 10 --max-time 90 "$URL6" -o "$d/v6"
   python3 - "$d" <<'PY'
@@ -106,7 +106,7 @@ restore() {
   prepare
   local d
   d=$(mktemp -d /tmp/xtls-spamhaus-restore.XXXXXXXX)
-  trap 'rm -rf "$d"' RETURN
+  trap 'rm -rf "${d:-}"' RETURN
   local ver
   for ver in 4 6; do
     if [[ ! -s "$ROOT/cidr$ver" ]]; then
