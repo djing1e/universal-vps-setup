@@ -93,7 +93,7 @@ def scan():
                        "event": "journal_cursor_lost", "action": "observe",
                        "detail": str(exc)[:160]}
             with (STATE / "health.jsonl").open("a") as f:
-                f.write(json.dumps(warning) + "\\n")
+                f.write(json.dumps(warning) + "\n")
             temporary = STATE / "cursor.tmp"
             temporary.write_text("")
             temporary.replace(statefile)
