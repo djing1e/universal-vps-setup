@@ -9520,6 +9520,94 @@ diagnostics_disable() {
   echo disabled > "$ROOT/diagnostics-mode"
   echo "Spamhaus matched-packet logging disabled"
 }
+diagnostics_report() {
+  # Explicitly on-demand. No background worker, network request, or persistent index.
+  # journalctl bounds both time and rows; tail seeks backwards instead of reading all access.log.
+  python3 - "$ROOT" <<'PY'
+import collections, datetime as dt, ipaddress, os, re, subprocess, sys
+from pathlib import Path
+ROOT=Path(sys.argv[1])
+ACCESS=Path('/var/log/remnanode/access.log')
+LIMIT_EVENTS=60
+LIMIT_JOURNAL=3000
+LIMIT_ACCESS=20000
+WINDOW=3.0
+def run(cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=8, check=False).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ''
+def parse_time(t):
+    try:
+        return dt.datetime.fromisoformat(t.replace('Z','+00:00')).timestamp()
+    except ValueError:
+        return None
+# Read at most 3000 recent kernel messages and only retain 60 Spamhaus log records.
+journal=run(['journalctl','-k','--since','2 hours ago','-n',str(LIMIT_JOURNAL),'--no-pager','-o','short-iso'])
+events=[]
+for line in journal.splitlines():
+    if 'XTLS-SH4 ' not in line and 'XTLS-SH6 ' not in line:
+        continue
+    ts=parse_time(line.split(' ',1)[0])
+    dst=re.search(r'\\bDST=([^ ]+)',line)
+    proto=re.search(r'\\bPROTO=(TCP|UDP)\\b',line)
+    port=re.search(r'\\bDPT=(\\d+)\\b',line)
+    if ts is None or not dst or not proto or not port: continue
+    events.append((ts,dst.group(1),proto.group(1).lower(),port.group(1)))
+events=events[-LIMIT_EVENTS:]
+if not events:
+    print('No Spamhaus kernel matches in bounded recent journal sample.')
+    print('Limits: 2h / last 3000 kernel records; no network requests.')
+    raise SystemExit(0)
+ranges={4:[],6:[]}
+for ver in (4,6):
+    file=ROOT/f'cidr{ver}'
+    if file.exists():
+        for line in file.read_text().splitlines():
+            try: ranges[ver].append(ipaddress.ip_network(line.strip()))
+            except ValueError: pass
+# Avoid 60*1800 comparisons by mapping unique destinations once.
+range_cache={}
+def cidr_for(ip):
+    if ip not in range_cache:
+        try:
+            addr=ipaddress.ip_address(ip)
+            range_cache[ip]=next((str(n) for n in ranges[addr.version] if addr in n), '?')
+        except ValueError:
+            range_cache[ip]='?'
+    return range_cache[ip]
+records=[]
+if ACCESS.is_file():
+    content=run(['tail','-n',str(LIMIT_ACCESS),str(ACCESS)])
+    pattern=re.compile(r'^(\\d{4}/\\d\\d/\\d\\d \\d\\d:\\d\\d:\\d\\d)\\.\\d+ .*? accepted (tcp|udp):([^ ]+) \\[([^]]+)\\] email: (\\S+)')
+    for line in content.splitlines():
+        m=pattern.search(line)
+        if not m: continue
+        moment=dt.datetime.strptime(m.group(1),'%Y/%m/%d %H:%M:%S').replace(tzinfo=dt.timezone.utc).timestamp()
+        target=m.group(3).rsplit(':',1)
+        if len(target)!=2: continue
+        records.append((moment,target[0].strip('[]'),m.group(2),target[1],m.group(4),m.group(5)))
+print(f'Spamhaus OUTPUT correlations: {len(events)} sampled packets (not unique connections)')
+print(f'Limits: last {LIMIT_JOURNAL} kernel entries, last {LIMIT_ACCESS} access.log lines, ±{WINDOW:g}s UTC')
+if not ACCESS.is_file(): print('WARN: Remnanode access.log is missing')
+unique={}
+for t,ip,proto,port in events:
+    key=(ip,proto,port)
+    if key not in unique: unique[key]=[t,0]
+    unique[key][1]+=1
+for (ip,proto,port),(t,count) in list(unique.items())[-25:]:
+    moment=dt.datetime.fromtimestamp(t,dt.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+    candidates={(r[4],r[5]) for r in records if abs(r[0]-t)<=WINDOW and r[1]==ip and r[2]==proto and r[3]==port}
+    print(f'\\n{moment}  {proto.upper()} {ip}:{port}  packets_sampled={count}  range={cidr_for(ip)}')
+    if len(candidates)==1:
+        user,route=next(iter(candidates))
+        print(f'  Remnanode candidate: email={user} route={route} (time/destination match; not proof)')
+    elif candidates:
+        print('  Ambiguous Remnanode candidates: '+', '.join(f'{u} [{r}]' for u,r in sorted(candidates)[:8]))
+    else: print('  Remnanode: no match in bounded access.log sample')
+print('No blocking performed. No process/user attribution without an unambiguous corroborating record.')
+PY
+}
 diagnostics_show() {
   echo "Recent Spamhaus OUTPUT log events (kernel journal):"
   journalctl -k --since "2 hours ago" --no-pager -o short-iso 2>/dev/null |
@@ -9538,7 +9626,8 @@ case "${1:-}" in
   diagnostics-enable) diagnostics_enable ;;
   diagnostics-disable) diagnostics_disable ;;
   diagnostics-show) diagnostics_show ;;
-  *) echo "Usage: xtls-spamhaus-output {install|update|restore|status|diagnostics-enable|diagnostics-disable|diagnostics-show}" >&2;exit 2 ;;
+  diagnostics-report) diagnostics_report ;;
+  *) echo "Usage: xtls-spamhaus-output {install|update|restore|status|diagnostics-enable|diagnostics-disable|diagnostics-show|diagnostics-report}" >&2;exit 2 ;;
 esac
 XTLS_SPAMHAUS_OUTPUT_MODULE_END
 }
@@ -9554,6 +9643,7 @@ setup_spamhaus_out_observe() {
     echo "4) Включить ограниченное журналирование совпадений"
     echo "5) Отключить журналирование"
     echo "6) Последние события (2 часа)"
+    echo "7) Отчёт: Spamhaus + Remnanode (по запросу)"
     echo "0) Назад"
     read -e -r -p "Выбор: " choice || { rm -f "$f"; return 0; }
     case "$choice" in
@@ -9563,6 +9653,7 @@ setup_spamhaus_out_observe() {
         4) bash "$f" diagnostics-enable || rc=$? ;;
         5) bash "$f" diagnostics-disable || rc=$? ;;
         6) bash "$f" diagnostics-show || rc=$? ;;
+        7) bash "$f" diagnostics-report || rc=$? ;;
         0) ;;
         *) echo "Неверный выбор" ;;
     esac
