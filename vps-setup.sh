@@ -9163,7 +9163,7 @@ setup_c2_feed() {
         echo "Ошибка проверки встроенного C2-модуля"
         return 1
     fi
-    echo "  1) Установить / обновить C2 IP:port (сохранить выбранный режим)"
+    echo "  1) Установить / обновить и включить C2-блокировку TCP"
     echo "  2) Статус"
     echo "  3) Обновить IP:port сейчас"
     echo "  4) Включить блокировку TCP"
@@ -9173,13 +9173,13 @@ setup_c2_feed() {
     case "$choice" in
         1)
             if bash "$file" install; then
-                echo ""
-                if [[ "$("$file" status 2>/dev/null | grep '^Saved mode:' | awk '{print $3}')" == block ]]; then
-                    echo "C2 Anti-Abuse уже настроен в режиме block. Повторное подтверждение не требуется."
-                elif [[ ! -f /etc/xtls-c2-feed/mode || "$(< /etc/xtls-c2-feed/mode)" != observe ]]; then
-                    echo "Установка завершена. Режим можно проверить через пункт 2."
+                if [[ "$(cat /etc/xtls-c2-feed/mode 2>/dev/null)" == block ]] &&
+                   nft list chain ip xtls_c2_feed output 2>/dev/null | grep -q 'xtls-c2-block'; then
+                    echo "C2 Anti-Abuse: блокировка уже активна."
                 else
-                    echo "Режим observe сохранён. Чтобы включить блокировку, выберите пункт 4."
+                    # Automatic enable specifically requested by menu item 1.
+                    # The embedded module asks for a confirmation phrase; provide it non-interactively.
+                    printf 'ENABLE-C2-BLOCK\n' | bash "$file" enable-block || rc=$?
                 fi
             else
                 rc=$?
