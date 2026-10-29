@@ -167,7 +167,67 @@ def scan():
         print(f"Observed {len(events)} logged packets; {len(out)} distinct flows (10-minute dedup window); unique user matches: {sum(x['status']=='matched' for x in out)}; bans: 0")
 
 
-def behavior():
+def record_behavior_incidents(results, now):
+    """Persist bounded, deduplicated signals; never modify subscribers or firewall."""
+    STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    file = STATE / "behavior-incidents.json"
+    lockfile = STATE / "behavior.lock"
+    with lockfile.open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            data = json.loads(file.read_text()) if file.exists() else []
+            if not isinstance(data, list):
+                raise ValueError("invalid incident store")
+            if any(not isinstance(item, dict) for item in data):
+                raise ValueError("invalid incident item")
+        except (OSError, ValueError, TypeError) as exc:
+            # Preserve corrupted state for investigation; fail open, never ban.
+            print("WARNING: incident state unreadable; not overwriting: " + str(exc)[:100], file=sys.stderr)
+            return
+        retention = 7 * 86400
+        data = [item for item in data if isinstance(item.get("last_seen_epoch"), (float, int))
+                and 0 <= now - item["last_seen_epoch"] <= retention]
+        for result in results:
+            user = result["user"]
+            for reason in result["reasons"]:
+                existing = next((item for item in reversed(data)
+                                 if item.get("user") == user and item.get("reason") == reason
+                                 and 0 <= now - item["last_seen_epoch"] < 1800), None)
+                if existing:
+                    existing["last_seen_epoch"] = now
+                    existing["observations"] = min(100000, existing.get("observations", 1) + 1)
+                else:
+                    data.append({"user": user, "reason": reason,
+                                 "first_seen_epoch": now, "last_seen_epoch": now,
+                                 "observations": 1, "status": "SUSPICIOUS",
+                                 "action": "observe"})
+        # Bounded history, fixed size; most recently updated incidents first.
+        data = sorted(data, key=lambda item: item["last_seen_epoch"])[-1000:]
+        import tempfile
+        fd, tmp = tempfile.mkstemp(prefix=".behavior-", dir=str(STATE))
+        try:
+            with os.fdopen(fd, "w") as out:
+                os.fchmod(out.fileno(), 0o600)
+                json.dump(data, out, separators=(",", ":"))
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(tmp, file)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+
+
+def behavior_history():
+    file = STATE / "behavior-incidents.json"
+    if not file.exists():
+        print("[]")
+        return
+    with file.open() as f:
+        data = json.load(f)
+    print(json.dumps(data[-100:], ensure_ascii=False))
+
+
+def behavior(record=False):
     """Bounded subscription-level heuristics from Xray access logs; observation only."""
     from collections import defaultdict
     import ipaddress
@@ -285,6 +345,8 @@ def behavior():
                 "windows_seconds": measures,
                 "action": "observe",
             })
+    if record:
+        record_behavior_incidents(results, now)
     print(json.dumps({
         "time_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "source": str(ACCESS),
@@ -321,11 +383,15 @@ def report():
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action", choices=["scan", "report", "behavior"])
+    p.add_argument("action", choices=["scan", "report", "behavior", "behavior-record", "behavior-history"])
     args = p.parse_args()
     if args.action == "scan":
         scan()
     elif args.action == "behavior":
         behavior()
+    elif args.action == "behavior-record":
+        behavior(record=True)
+    elif args.action == "behavior-history":
+        behavior_history()
     else:
         report()
