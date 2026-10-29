@@ -12,7 +12,7 @@ install_guard() {
   command -v curl >/dev/null
   local tmp
   tmp=$(mktemp)
-  trap 'rm -f "$tmp"' EXIT
+  trap 'rm -f "$tmp"' RETURN
   curl -fsSL --connect-timeout 10 --max-time 40 "$SCRIPT_URL" -o "$tmp"
   python3 -m py_compile "$tmp"
   install -o root -g root -m 0755 "$tmp" "$TARGET"
