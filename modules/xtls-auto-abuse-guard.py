@@ -3,6 +3,7 @@
 import argparse
 import datetime as dt
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,8 @@ ACCESS = Path("/var/log/remnanode/access.log")
 MAX_EVENTS = 100
 MAX_ACCESS_BYTES = 2 * 1024 * 1024
 WINDOW_SEC = 3
+FLOW_TTL_SEC = 600
+MAX_FLOW_KEYS = 4096
 EVENT_RE = re.compile(r"\bSRC=(\S+).*?\bDST=(\S+).*?\bPROTO=(TCP|UDP)\b.*?\bSPT=(\d+)\b.*?\bDPT=(\d+)\b")
 ACCESS_RE = re.compile(r"^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d)\.\d+ .*? accepted (tcp|udp):(\S+) \[([^]]+)\] email: (\S+)")
 
@@ -106,21 +109,43 @@ def scan():
             print("INFO: journal batch full; next scan resumes from saved cursor (no newest-only skipping)")
         records = read_recent_access()
         out = []
-        seen_flows = set()
+        flows_path = STATE / "flows.json"
+        try:
+            previous = json.loads(flows_path.read_text()) if flows_path.exists() else {}
+            if not isinstance(previous, dict):
+                raise ValueError("invalid flow state")
+            previous = {str(k): float(v) for k, v in previous.items()}
+        except (OSError, ValueError, TypeError):
+            previous = {}
+            print("WARNING: dedup state unreadable; continuity not guaranteed")
+        newest = max(e[1] for e in events)
+        previous = {k: v for k, v in previous.items()
+                    if newest - FLOW_TTL_SEC <= v <= newest + 60}
         for ecursor, stamp, dst, proto, port, src, sport in events:
-            flow = (src, sport, dst, port, proto, int(stamp // 60))
-            if flow in seen_flows:
+            # The source port belongs to the server's outbound socket, not VPN client.
+            flow = hashlib.sha256(
+                json.dumps([src, sport, dst, port, proto], separators=(",", ":")).encode()
+            ).hexdigest()[:24]
+            if flow in previous and abs(stamp - previous[flow]) <= FLOW_TTL_SEC:
+                previous[flow] = max(previous[flow], stamp)
                 continue
-            seen_flows.add(flow)
+            previous[flow] = stamp
             matches = {(user, route) for t, p, addr, dport, user, route in records
                        if abs(t - stamp) <= WINDOW_SEC and p == proto and addr == dst and dport == port}
+            users = sorted({user for user, route in matches})
             record = {"time_utc": dt.datetime.fromtimestamp(stamp, dt.timezone.utc).isoformat(),
                       "destination": dst, "port": int(port), "protocol": proto,
-                      "matched_users": sorted(u for u, _ in matches),
-                      "status": "matched" if len(matches) == 1 else ("ambiguous" if matches else "unmatched"),
+                      "matched_users": users,
+                      "status": "matched" if len(users) == 1 else ("ambiguous" if users else "unmatched"),
                       "action": "observe"}
             out.append(record)
-        # State is written atomically; no remote calls or firewall actions.
+        if len(previous) > MAX_FLOW_KEYS:
+            previous = dict(sorted(previous.items(), key=lambda kv: kv[1], reverse=True)[:MAX_FLOW_KEYS])
+            print("WARNING: dedup capacity reached; oldest keys evicted")
+        temporary_flows = STATE / "flows.tmp"
+        temporary_flows.write_text(json.dumps(previous, separators=(",", ":")))
+        temporary_flows.replace(flows_path)
+        # Observe only; no remote calls or firewall actions.
         with (STATE / "detections.jsonl").open("a") as f:
             for row in out:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -139,7 +164,7 @@ def scan():
             temporary = STATE / "cursor.tmp"
             temporary.write_text(lastcursor + "\n")
             temporary.replace(statefile)
-        print(f"Observed {len(events)} logged packets; {len(out)} distinct flows (within minute buckets); unique user matches: {sum(x['status']=='matched' for x in out)}; bans: 0")
+        print(f"Observed {len(events)} logged packets; {len(out)} distinct flows (10-minute dedup window); unique user matches: {sum(x['status']=='matched' for x in out)}; bans: 0")
 
 def report():
     file = STATE / "detections.jsonl"
