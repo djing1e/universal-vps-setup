@@ -149,6 +149,9 @@ print(sum(len(e["set"].get("elem",[])) for e in obj["nftables"] if "set" in e))
       return 1
     }
   done
+  if [[ "$(cat "$ROOT/diagnostics-mode" 2>/dev/null || true)" == enabled ]]; then
+    diagnostics_enable
+  fi
 )
 diagnostics_enable() {
   prepare
