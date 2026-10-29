@@ -9240,7 +9240,7 @@ with out.open('w') as f:
         f.write('add element ip xtls_udp_abuse udp_pairs { '+', '.join(f'{ip} . {port}' for ip,port in sorted(pairs))+' }\n')
 print('Confirmed UDP pairs:',len(pairs))
 PY
-  if ! nft -c -f "$tmp/batch"; then rm -rf "$tmp"; return 1; fi
+  if [[ ! -s "$tmp/batch" ]] || ! nft -c -f "$tmp/batch"; then rm -rf "$tmp"; return 1; fi
   nft -f "$tmp/batch"
   rm -rf "$tmp"
 }
@@ -9253,6 +9253,7 @@ install_module() {
   install -d -m 700 "$ROOT"
   prepare
   load
+  if [[ -f "$ROOT/mode" && $(cat "$ROOT/mode") == block && -s "$CSV" ]]; then enable_block; fi
   install -m 755 "$0" /usr/local/sbin/xtls-udp-abuse
   cat > /etc/systemd/system/xtls-udp-abuse-restore.service <<'UNIT'
 [Unit]
@@ -9271,12 +9272,35 @@ UNIT
   systemctl enable xtls-udp-abuse-restore.service
   echo 'UDP monitoring installed; blocking disabled'
 }
-restore() { prepare; load; }
+restore() { prepare; load; if [[ -f "$ROOT/mode" && $(cat "$ROOT/mode") == block && -s "$CSV" ]]; then enable_block; fi; }
+udp_drop_handle() {
+ nft -a list chain ip "$TABLE" output 2>/dev/null | sed -n '/xtls-udp-block/s/.*# handle \\([0-9][0-9]*\\).*/\\1/p' | head -1
+}
+enable_block() {
+  install -d -m 700 "$ROOT"
+  [[ -s "$CSV" ]] || { echo 'Нет подтверждённых UDP IP:port; DROP не включён'; return 1; }
+  prepare
+  load || return 1
+  local h
+  h=$(udp_drop_handle)
+  [[ -n "$h" ]] || nft add rule ip "$TABLE" output ip daddr . udp dport @udp_pairs counter drop comment '"xtls-udp-block"'
+  printf 'block\\n' > "$ROOT/mode"
+  echo 'UDP DROP active'
+}
+disable_block() {
+  local h
+  printf 'observe\\n' > "$ROOT/mode"
+  h=$(udp_drop_handle)
+  [[ -z "$h" ]] || nft delete rule ip "$TABLE" output handle "$h"
+  echo 'UDP DROP disabled'
+}
 [[ $(id -u) == 0 ]] || { echo 'Run as root' >&2; exit 1; }
 case "${1:-}" in
   install) install_module;;
   restore) restore;;
   status) status;;
+  enable-block) enable_block;;
+  disable-block) disable_block;;
   *) echo 'Usage: xtls-udp-abuse {install|restore|status}' >&2;exit 2;;
 esac
 XTLS_UDP_EMBEDDED_END
@@ -9290,12 +9314,16 @@ setup_udp_abuse() {
     echo "  1) Установить UDP-наблюдение (без DROP)"
     echo "  2) Статус и счётчики"
     echo "  3) Перезагрузить подтверждённый UDP CSV"
+    echo "  4) Включить UDP DROP (только подтверждённые IP:port)"
+    echo "  5) Отключить UDP DROP"
     echo "  0) Назад"
     read -e -r -p "Выбор: " choice
     case "$choice" in
       1) bash "$f" install || rc=$? ;;
       2) bash "$f" status || rc=$? ;;
       3) if [[ -x /usr/local/sbin/xtls-udp-abuse ]]; then /usr/local/sbin/xtls-udp-abuse restore || rc=$?; else echo "Сначала установите"; fi ;;
+      4) bash "$f" enable-block || rc=$? ;;
+      5) bash "$f" disable-block || rc=$? ;;
       0) ;;
       *) echo 'Неверный выбор' ;;
     esac
