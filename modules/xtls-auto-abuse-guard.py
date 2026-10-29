@@ -55,7 +55,10 @@ def get_events(cursor):
     if result.returncode == 1 and not result.stdout.strip() and result.stderr.strip() in ("", "-- No entries --"):
         return []
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip()[:200] or f"journalctl exit={result.returncode}")
+        msg = result.stderr.strip()[:200]
+        if cursor and ("Failed to seek to journal cursor" in msg or "Invalid cursor" in msg):
+            raise LookupError("stale journal cursor: " + msg)
+        raise RuntimeError(msg or f"journalctl exit={result.returncode}")
     events = []
     for line in result.stdout.splitlines():
         try:
@@ -82,10 +85,25 @@ def scan():
             return
         statefile = STATE / "cursor"
         cursor = statefile.read_text().strip() if statefile.exists() else ""
-        events = get_events(cursor)
+        try:
+            events = get_events(cursor)
+        except LookupError as exc:
+            # Explicit discontinuity: no user action or fabricated attribution.
+            warning = {"time_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+                       "event": "journal_cursor_lost", "action": "observe",
+                       "detail": str(exc)[:160]}
+            with (STATE / "health.jsonl").open("a") as f:
+                f.write(json.dumps(warning) + "\\n")
+            temporary = STATE / "cursor.tmp"
+            temporary.write_text("")
+            temporary.replace(statefile)
+            print("WARNING: journal cursor lost; discontinuity recorded; next scan starts recent window")
+            return
         if not events:
             print("No new Spamhaus OUTPUT events")
             return
+        if len(events) >= MAX_EVENTS:
+            print("WARNING: journal event batch reached limit; check for missed events before enabling enforcement")
         records = read_recent_access()
         out = []
         for ecursor, stamp, dst, proto, port in events:
