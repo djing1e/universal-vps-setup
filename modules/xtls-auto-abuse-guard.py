@@ -182,6 +182,7 @@ def behavior():
     earliest = min((r[0] for r in all_records), default=None)
     latest = max((r[0] for r in all_records), default=None)
     domain_activity = defaultdict(lambda: {w: [] for w in windows})
+    ssh_timeline = defaultdict(list)
     for stamp, proto, dest, port, user, route in all_records:
         age = now - stamp
         if age < -60 or age > max(windows):
@@ -211,6 +212,8 @@ def behavior():
         if not ip.is_global:
             nonglobal += 1
             continue
+        if proto == "tcp" and parsed_port == 22:
+            ssh_timeline[user].append((stamp, host))
         for window in windows:
             if age <= window:
                 activity[user][window].append((proto, host, parsed_port))
@@ -250,6 +253,30 @@ def behavior():
             if window == 1800 and len(nonweb_ips) >= 75 and len(nonweb_ports) >= 12:
                 suspicious = True
                 reasons.append("thirty_minute_nonweb_fanout")
+        # Sliding 90-second window anchored to event times, not the scan time.
+        ssh_events = sorted(ssh_timeline[user])
+        left = 0
+        counts = {}
+        peak = {"unique_ips": 0, "events": 0, "start_utc": None, "end_utc": None}
+        for right, (stamp, host) in enumerate(ssh_events):
+            counts[host] = counts.get(host, 0) + 1
+            while stamp - ssh_events[left][0] > 90:
+                old_host = ssh_events[left][1]
+                counts[old_host] -= 1
+                if not counts[old_host]:
+                    del counts[old_host]
+                left += 1
+            if len(counts) > peak["unique_ips"]:
+                peak = {
+                    "unique_ips": len(counts),
+                    "events": right - left + 1,
+                    "start_utc": dt.datetime.fromtimestamp(ssh_events[left][0], dt.timezone.utc).isoformat(),
+                    "end_utc": dt.datetime.fromtimestamp(stamp, dt.timezone.utc).isoformat(),
+                }
+        measures["ssh_90s_peak"] = peak
+        if peak["unique_ips"] >= 12:
+            suspicious = True
+            reasons.append("ssh_90s_burst")
         if suspicious:
             results.append({
                 "user": user,
