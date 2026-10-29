@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-SCRIPT_URL="https://raw.githubusercontent.com/djing1e/universal-vps-setup/feature/auto-abuse-guard-observe-20261029/modules/xtls-auto-abuse-guard.py"
+SCRIPT_URL="https://raw.githubusercontent.com/djing1e/universal-vps-setup/b3eb5fc22fc705e255d10d378b19067737c4624b/modules/xtls-auto-abuse-guard.py"
 TARGET=/usr/local/sbin/xtls-auto-abuse-guard
 SERVICE=/etc/systemd/system/xtls-auto-abuse-guard.service
 TIMER=/etc/systemd/system/xtls-auto-abuse-guard.timer
@@ -15,6 +15,7 @@ install_guard() {
   trap 'rm -f "$tmp"' RETURN
   curl -fsSL --connect-timeout 10 --max-time 40 "$SCRIPT_URL" -o "$tmp"
   python3 -m py_compile "$tmp"
+  grep -q 'behavior-record' "$tmp" || { echo "Behavior support missing" >&2; return 1; }
   install -o root -g root -m 0755 "$tmp" "$TARGET"
   cat > "$SERVICE" <<'UNIT'
 [Unit]
@@ -26,6 +27,7 @@ ConditionPathExists=/usr/local/sbin/xtls-auto-abuse-guard
 Type=oneshot
 User=root
 ExecStart=/usr/bin/python3 /usr/local/sbin/xtls-auto-abuse-guard scan
+ExecStart=/usr/bin/python3 /usr/local/sbin/xtls-auto-abuse-guard behavior-record
 StateDirectory=xtls-auto-abuse-guard
 StateDirectoryMode=0700
 UMask=0077
