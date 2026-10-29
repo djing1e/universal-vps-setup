@@ -100,7 +100,8 @@ UNIT
   # Failed downloads must not leave an enabled but empty installation.
   update
   systemctl daemon-reload
-  systemctl enable xtls-spamhaus-output-restore.service xtls-spamhaus-output-update.timer
+  systemctl enable xtls-spamhaus-output-restore.service
+  systemctl enable --now xtls-spamhaus-output-update.timer
 }
 restore() (
   prepare
