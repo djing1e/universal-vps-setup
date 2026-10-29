@@ -52,7 +52,7 @@ def get_events(cursor):
         cmd += ["--since", "3 minutes ago"]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=8, check=False)
     # journalctl --grep returns status 1 when no records match; this is normal.
-    if result.returncode == 1 and not result.stdout.strip() and not result.stderr.strip():
+    if result.returncode == 1 and not result.stdout.strip() and result.stderr.strip() in ("", "-- No entries --"):
         return []
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip()[:200] or f"journalctl exit={result.returncode}")
