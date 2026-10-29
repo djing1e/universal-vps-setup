@@ -249,6 +249,67 @@ def record_behavior_incidents(results, now):
                 os.unlink(tmp)
 
 
+def group_behavior_episodes(incidents, merge_gap=90):
+    """Derived view: group overlapping evidence for same subscription.
+    Legacy rows remain separate unless they have evidence boundaries.
+    This is a report only; no migration or destructive rewrite.
+    """
+    groups = []
+    keyed = {}
+    for row in incidents:
+        user = row.get("user")
+        start = row.get("evidence_start_epoch")
+        end = row.get("evidence_end_epoch")
+        if not user or not isinstance(start, (int, float)) or not isinstance(end, (int, float)) or end < start:
+            continue
+        keyed.setdefault(user, []).append(row)
+    for user, rows in sorted(keyed.items()):
+        rows.sort(key=lambda x: (x["evidence_start_epoch"], x["evidence_end_epoch"]))
+        components = []
+        for row in rows:
+            a, b = row["evidence_start_epoch"], row["evidence_end_epoch"]
+            matches = [g for g in components if a <= g["end"] + merge_gap and b >= g["start"] - merge_gap]
+            if not matches:
+                components.append({"start": a, "end": b, "rows": [row]})
+            else:
+                base = matches[0]
+                base["start"] = min(base["start"], a)
+                base["end"] = max(base["end"], b)
+                base["rows"].append(row)
+                for other in matches[1:]:
+                    base["start"] = min(base["start"], other["start"])
+                    base["end"] = max(base["end"], other["end"])
+                    base["rows"].extend(other["rows"])
+                    components.remove(other)
+        for group in components:
+            ids = sorted({str(x["incident_id"]) for x in group["rows"] if x.get("incident_id")})
+            key = json.dumps([user, ids], separators=(",", ":"))
+            groups.append({
+                "episode_id": hashlib.sha256(key.encode()).hexdigest()[:24],
+                "user": user,
+                "start_epoch": group["start"],
+                "end_epoch": group["end"],
+                "reasons": sorted({x["reason"] for x in group["rows"]}),
+                "incident_ids": ids,
+                "signals": len(group["rows"]),
+                "status": "SUSPICIOUS",
+                "action": "observe",
+            })
+    return sorted(groups, key=lambda x: (x["start_epoch"], x["user"]))
+
+
+def behavior_episodes():
+    file = STATE / "behavior-incidents.json"
+    if not file.exists():
+        print("[]")
+        return
+    with file.open() as source:
+        data = json.load(source)
+    if not isinstance(data, list):
+        raise ValueError("invalid incident store")
+    print(json.dumps(group_behavior_episodes(data), ensure_ascii=False))
+
+
 def behavior_history():
     file = STATE / "behavior-incidents.json"
     if not file.exists():
@@ -427,7 +488,7 @@ def report():
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action", choices=["scan", "report", "behavior", "behavior-record", "behavior-history"])
+    p.add_argument("action", choices=["scan", "report", "behavior", "behavior-record", "behavior-history", "behavior-episodes"])
     args = p.parse_args()
     if args.action == "scan":
         scan()
@@ -437,5 +498,7 @@ if __name__ == "__main__":
         behavior(record=True)
     elif args.action == "behavior-history":
         behavior_history()
+    elif args.action == "behavior-episodes":
+        behavior_episodes()
     else:
         report()
