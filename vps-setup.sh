@@ -8971,6 +8971,38 @@ elif [[ ${1:-} == --test-crowdsec ]]; then
     exit $?
 fi
 
+# Optional C2 IP:port feed, independent of CrowdSec and existing firewall.
+setup_c2_feed() {
+    local file choice rc=0
+    file=$(mktemp) || return 1
+    if ! curl -fsSL --retry 2 --connect-timeout 10 --max-time 60 \
+        https://raw.githubusercontent.com/djing1e/universal-vps-setup/main/modules/xtls-c2-feed.sh -o "$file"; then
+        if ! curl -fsSL --retry 2 --connect-timeout 10 --max-time 60 \
+            https://cdn.jsdelivr.net/gh/djing1e/universal-vps-setup@main/modules/xtls-c2-feed.sh -o "$file"; then
+            rm -f "$file"
+            echo "Ошибка загрузки модуля C2"
+            return 1
+        fi
+    fi
+    if ! bash -n "$file"; then rm -f "$file"; return 1; fi
+    echo "  1) Установить обновляемый C2 IP:port feed (без блокировки)"
+    echo "  2) Статус"
+    echo "  3) Обновить сейчас"
+    echo "  4) Включить блокировку TCP (риск ложных срабатываний)"
+    echo "  5) Отключить блокировку TCP"
+    echo "  0) Назад"
+    read -r -p "Выбор: " choice
+    case "$choice" in
+        1) bash "$file" install || rc=$? ;;
+        2) bash "$file" status || rc=$? ;;
+        3) bash "$file" update || rc=$? ;;
+        4) bash "$file" enable-block || rc=$? ;;
+        5) bash "$file" disable-block || rc=$? ;;
+    esac
+    rm -f "$file"
+    return "$rc"
+}
+
 # =====================================
 # ГЛАВНОЕ МЕНЮ
 # =====================================
@@ -9035,12 +9067,15 @@ while true; do
     echo "     временный HTTP/HTTPS на своих портах, лог подключений;"
     echo "     проверить новый IP на блок ДО того как вешать домен"
     echo ""
+    echo " 18) Anti-Abuse C2 IP:port — GitHub feed (по умолчанию без DROP)"
+    echo "     обновление раз в 6 часов; блокировка включается вручную"
+    echo ""
     echo "  W) 🧹 Полная вычистка (откат всего начисто)"
     echo "     снести все слои перед чистым накатом"
     echo ""
     echo "  0) Выход"
     echo ""
-    read -e -p "Выберите действие [00=всё / 0-17 / W=вычистка]: " MAIN_CHOICE
+    read -e -p "Выберите действие [00=всё / 0-18 / W=вычистка]: " MAIN_CHOICE
 
     case $MAIN_CHOICE in
         00|s|S|star|"*"|★) setup_one_button ;;
@@ -9061,6 +9096,7 @@ while true; do
        15) setup_antiddos ;;
        16) setup_threat_blocklist ;;
        17) setup_probe_server ;;
+       18) setup_c2_feed ;;
         W|w|wipe|WIPE) cleanup_legacy ;;
         0) log "=== Выход из vps-setup.sh ==="; echo "Выход."; exit 0 ;;
         *) echo "Неверный выбор." ;;
