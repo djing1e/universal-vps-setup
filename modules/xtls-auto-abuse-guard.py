@@ -176,7 +176,12 @@ def behavior():
     windows = (300, 1800)
     activity = defaultdict(lambda: {w: [] for w in windows})
     invalid = 0
-    for stamp, proto, dest, port, user, route in read_recent_access():
+    domains = 0
+    nonglobal = 0
+    all_records = read_recent_access()
+    earliest = min((r[0] for r in all_records), default=None)
+    latest = max((r[0] for r in all_records), default=None)
+    for stamp, proto, dest, port, user, route in all_records:
         age = now - stamp
         if age < -60 or age > max(windows):
             continue
@@ -184,10 +189,18 @@ def behavior():
             parsed_port = int(port)
             host = dest.strip("[]")
             ip = ipaddress.ip_address(host)
-            if not ip.is_global or not 1 <= parsed_port <= 65535:
+            if not 1 <= parsed_port <= 65535:
+                invalid += 1
+                continue
+            if not ip.is_global:
+                nonglobal += 1
                 continue
         except ValueError:
-            invalid += 1
+            # Domain names are valid Xray destinations but not numeric IPs.
+            if 1 <= parsed_port <= 65535 and re.fullmatch(r"(?=.{1,253}$)[a-zA-Z0-9_-]+(?:\\.[a-zA-Z0-9_-]+)*\\.?", host):
+                domains += 1
+            else:
+                invalid += 1
             continue
         for window in windows:
             if age <= window:
@@ -238,6 +251,13 @@ def behavior():
         "max_access_bytes": MAX_ACCESS_BYTES,
         "window_seconds": list(windows),
         "subscriptions_seen": len(activity),
+        "access_log_first_utc": dt.datetime.fromtimestamp(earliest, dt.timezone.utc).isoformat() if earliest is not None else None,
+        "access_log_last_utc": dt.datetime.fromtimestamp(latest, dt.timezone.utc).isoformat() if latest is not None else None,
+        "access_log_span_seconds": round(latest - earliest) if earliest is not None and latest is not None else 0,
+        "oldest_record_age_seconds": round(now - earliest) if earliest is not None else None,
+        "full_30min_coverage": earliest is not None and earliest <= now - 1800 and latest >= now - 60,
+        "domain_destinations_excluded": domains,
+        "non_global_ip_destinations_excluded": nonglobal,
         "suspected": results,
         "skipped_invalid_destinations": invalid,
         "attribution": "access_log_email",
