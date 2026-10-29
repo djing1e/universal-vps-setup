@@ -190,17 +190,26 @@ def record_behavior_incidents(results, now):
         for result in results:
             user = result["user"]
             for reason in result["reasons"]:
+                # Deduplicate by subscription, rule, and event time rather than
+                # the scheduled run time. Never inflate observations on rescans.
+                peak = result.get("windows_seconds", {}).get("ssh_90s_peak", {})
+                evidence = peak.get("start_utc") if reason == "ssh_90s_burst" else None
+                try:
+                    event_time = dt.datetime.fromisoformat(evidence).timestamp() if evidence else now
+                except (ValueError, TypeError):
+                    event_time = now
                 existing = next((item for item in reversed(data)
                                  if item.get("user") == user and item.get("reason") == reason
-                                 and 0 <= now - item["last_seen_epoch"] < 1800), None)
+                                 and isinstance(item.get("last_seen_epoch"), (int, float))
+                                 and 0 <= event_time - item["last_seen_epoch"] < 1800), None)
                 if existing:
-                    existing["last_seen_epoch"] = now
-                    existing["observations"] = min(100000, existing.get("observations", 1) + 1)
-                else:
-                    data.append({"user": user, "reason": reason,
-                                 "first_seen_epoch": now, "last_seen_epoch": now,
-                                 "observations": 1, "status": "SUSPICIOUS",
-                                 "action": "observe"})
+                    # Same episode: do not extend cooldown or increase counter.
+                    continue
+                data.append({"user": user, "reason": reason,
+                             "first_seen_epoch": event_time,
+                             "last_seen_epoch": event_time,
+                             "observations": 1, "status": "SUSPICIOUS",
+                             "action": "observe"})
         # Bounded history, fixed size; most recently updated incidents first.
         data = sorted(data, key=lambda item: item["last_seen_epoch"])[-1000:]
         import tempfile
