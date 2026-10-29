@@ -8976,8 +8976,10 @@ setup_c2_feed() {
     local file choice rc=0 token
     file=$(mktemp) || return 1
     chmod 600 "$file"
-    if [[ -x /usr/local/sbin/xtls-c2-feed ]]; then
-        cp /usr/local/sbin/xtls-c2-feed "$file" || { rm -f "$file"; return 1; }
+    if [[ -n "${XTLS_C2_MODULE_PATH:-}" && -f "$XTLS_C2_MODULE_PATH" && ! -L "$XTLS_C2_MODULE_PATH" ]]; then
+        cp -- "$XTLS_C2_MODULE_PATH" "$file" || { rm -f "$file"; return 1; }
+    elif [[ -f /usr/local/sbin/xtls-c2-feed && ! -L /usr/local/sbin/xtls-c2-feed ]]; then
+        cp -- /usr/local/sbin/xtls-c2-feed "$file" || { rm -f "$file"; return 1; }
     else
         echo "Репозиторий приватный. Для первой загрузки нужен GitHub token (Contents: Read)."
         read -r -s -p "GitHub token: " token
