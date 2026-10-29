@@ -8972,44 +8972,220 @@ elif [[ ${1:-} == --test-crowdsec ]]; then
 fi
 
 # Optional C2 IP:port feed, independent of CrowdSec and existing firewall.
+# Self-contained C2 module: works with a private GitHub repo and without a second token.
+# The single-file launcher must not try to access private Contents after unset TOKEN.
+xtls_c2_write_embedded_module() {
+    cat <<'XTLS_C2_EMBEDDED_MODULE_END_2026'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+TABLE=xtls_c2_feed
+ROOT=/etc/xtls-c2-feed
+URL=https://raw.githubusercontent.com/drb-ra/C2IntelFeeds/master/feeds/IPPortC2s.csv
+BACKUP=https://cdn.jsdelivr.net/gh/drb-ra/C2IntelFeeds@master/feeds/IPPortC2s.csv
+STATE="$ROOT/mode"
+CSV="$ROOT/validated.csv"
+lock() { exec 9>/run/xtls-c2-feed.lock; flock -x 9; }
+saved_mode() { local m=observe; if [[ -f "$STATE" ]]; then IFS= read -r m < "$STATE" || true; fi; case "$m" in observe|block) echo "$m";; *) echo "Invalid mode" >&2; return 1;; esac; }
+write_mode() { install -d -m 700 "$ROOT"; local f; f=$(mktemp "$ROOT/.mode.XXXXXX"); printf "%s\n" "$1" > "$f"; chmod 600 "$f"; mv -f "$f" "$STATE"; }
+mode() { if nft list chain ip "$TABLE" output 2>/dev/null | grep -q xtls-c2-block; then echo block; else echo observe; fi; }
+prepare() {
+ nft list table ip "$TABLE" >/dev/null 2>&1 || nft add table ip "$TABLE"
+ nft list set ip "$TABLE" c2_pairs >/dev/null 2>&1 || nft 'add set ip xtls_c2_feed c2_pairs { type ipv4_addr . inet_service; }'
+ nft list chain ip "$TABLE" output >/dev/null 2>&1 || nft 'add chain ip xtls_c2_feed output { type filter hook output priority -20; policy accept; }'
+}
+validate_and_apply() {
+ local tmp="$1" source="$2"
+ python3 - "$source" "$tmp/validated" "$tmp/batch" <<'PY'
+import csv,ipaddress,pathlib,sys
+source,validated,batch=map(pathlib.Path,sys.argv[1:])
+pairs=set()
+with source.open(newline='') as f:
+    for row in csv.reader(f):
+        if not row or row[0].strip().startswith('#'): continue
+        if len(row)<2: raise ValueError('Malformed CSV')
+        ip=ipaddress.ip_address(row[0].strip())
+        if ip.version!=4 or not ip.is_global: continue
+        port=int(row[1].strip())
+        if not 1<=port<=65535: raise ValueError('Invalid port')
+        pairs.add((str(ip),port))
+if not 1<=len(pairs)<=50000: raise ValueError(f'Unexpected feed size: {len(pairs)}')
+pairs=sorted(pairs,key=lambda p:(int(ipaddress.ip_address(p[0])),p[1]))
+validated.write_text(''.join(f'{ip},{port}\n' for ip,port in pairs))
+with batch.open('w') as f:
+    f.write('flush set ip xtls_c2_feed c2_pairs\n')
+    for i in range(0,len(pairs),500):
+        f.write('add element ip xtls_c2_feed c2_pairs { '+', '.join(f'{ip} . {port}' for ip,port in pairs[i:i+500])+' }\n')
+print('Validated pairs:',len(pairs))
+PY
+ local rc=$?
+ if (( rc != 0 )); then
+   echo "ERROR: C2 feed validation failed (exit $rc); existing nft set unchanged" >&2
+   return "$rc"
+ fi
+ [[ -s "$tmp/batch" && -s "$tmp/validated" ]] || { echo 'ERROR: missing validated feed or nft batch' >&2; return 1; }
+ prepare || return 1
+ nft -c -f "$tmp/batch" || return 1
+ nft -f "$tmp/batch" || return 1
+}
+remove_rules() {
+ local h
+ while :; do
+   h=$(nft -a list chain ip "$TABLE" output 2>/dev/null | sed -n '/xtls-c2-block/s/.*# handle \\([0-9][0-9]*\\).*/\\1/p' | head -1) || true
+   [[ -n "$h" ]] || break
+   nft delete rule ip "$TABLE" output handle "$h"
+ done
+}
+restore_locked() {
+ local tmp m
+ m=$(saved_mode)
+ [[ -s "$CSV" ]] || { echo 'No local C2 cache' >&2; return 1; }
+ tmp=$(mktemp -d)
+ validate_and_apply "$tmp" "$CSV" || { rm -rf "$tmp"; return 1; }
+ rm -rf "$tmp"
+ if [[ "$m" == block ]]; then
+   if [[ "$(mode)" != block ]]; then
+     nft add rule ip "$TABLE" output ip daddr . tcp dport @c2_pairs counter drop comment '"xtls-c2-block"'
+   fi
+ else
+   remove_rules
+ fi
+ echo "Restored. Mode: $m"
+}
+restore() ( lock; restore_locked; )
+update() (
+ lock
+ install -d -m 700 "$ROOT"
+ local tmp
+ tmp=$(mktemp -d)
+ if ! curl -fsSL --retry 2 --connect-timeout 10 --max-time 60 "$URL" -o "$tmp/source"; then
+   if ! curl -fsSL --retry 2 --connect-timeout 10 --max-time 60 "$BACKUP" -o "$tmp/source"; then
+     rm -rf "$tmp"
+     echo 'Feed unavailable: existing nft set and CSV preserved' >&2
+     return 1
+   fi
+ fi
+ validate_and_apply "$tmp" "$tmp/source" || { rm -rf "$tmp"; return 1; }
+ install -m 600 "$tmp/validated" "$ROOT/.validated.new"
+ mv -f "$ROOT/.validated.new" "$CSV"
+ rm -rf "$tmp"
+ if [[ "$(saved_mode)" == block && "$(mode)" != block ]]; then
+   nft add rule ip "$TABLE" output ip daddr . tcp dport @c2_pairs counter drop comment '"xtls-c2-block"'
+ fi
+ echo "Updated. Mode: $(mode)"
+)
+install_module() {
+ install -d -m 700 "$ROOT"
+ install -m 755 "$0" /usr/local/sbin/xtls-c2-feed
+ if [[ ! -f "$STATE" ]]; then write_mode observe; fi
+ cat >/etc/systemd/system/xtls-c2-feed-restore.service <<'UNIT'
+[Unit]
+Description=Restore xtlsproVPN C2 cache at boot
+After=local-fs.target
+Before=network-pre.target
+Wants=network-pre.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/xtls-c2-feed restore
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+UNIT
+ cat >/etc/systemd/system/xtls-c2-feed-update.service <<'UNIT'
+[Unit]
+Description=Update xtlsproVPN C2 IP and port feed
+Wants=network-online.target
+After=network-online.target xtls-c2-feed-restore.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/xtls-c2-feed update
+UNIT
+ cat >/etc/systemd/system/xtls-c2-feed-update.timer <<'UNIT'
+[Unit]
+Description=Update C2 feed every six hours
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=6h
+Persistent=true
+Unit=xtls-c2-feed-update.service
+[Install]
+WantedBy=timers.target
+UNIT
+ systemctl daemon-reload
+ if [[ -s "$CSV" ]]; then restore; else update; fi
+ systemctl enable xtls-c2-feed-restore.service xtls-c2-feed-update.timer
+ systemctl start xtls-c2-feed-restore.service
+ systemctl start xtls-c2-feed-update.timer
+ echo "Installed. Mode: $(saved_mode)"
+}
+block() {
+ echo 'WARNING: unverified C2 data can cause false-positive VPN disruptions.'
+ local answer tmp
+ read -e -r -p 'Type ENABLE-C2-BLOCK to activate outgoing TCP DROP: ' answer
+ [[ "$answer" == ENABLE-C2-BLOCK ]] || { echo 'Cancelled'; return; }
+ lock
+ [[ -s "$CSV" ]] || { echo 'No cached feed; update first' >&2; return 1; }
+ tmp=$(mktemp -d)
+ validate_and_apply "$tmp" "$CSV" || { rm -rf "$tmp"; return 1; }
+ rm -rf "$tmp"
+ if [[ "$(mode)" != block ]]; then
+   nft add rule ip "$TABLE" output ip daddr . tcp dport @c2_pairs counter drop comment '"xtls-c2-block"'
+ fi
+ write_mode block
+ echo 'Blocking enabled and persisted'
+}
+unblock() {
+ lock
+ write_mode observe
+ remove_rules
+ echo 'Blocking disabled and persisted'
+}
+
+[ "$(id -u)" -eq 0 ] || { echo 'Run as root'; exit 1; }
+case "${1:-}" in
+ install) install_module ;;
+ update) update ;;
+ restore) restore ;;
+ enable-block) block ;;
+ disable-block) unblock ;;
+ status) echo "Saved mode: $(saved_mode)"; echo "Live mode: $(mode)"; [ ! -f "$CSV" ] || wc -l "$CSV"; systemctl is-enabled xtls-c2-feed-restore.service 2>/dev/null || true; systemctl is-enabled xtls-c2-feed-update.timer 2>/dev/null || true ;;
+ *) echo 'Usage: xtls-c2-feed {install|update|restore|enable-block|disable-block|status}' ; exit 2 ;;
+esac
+XTLS_C2_EMBEDDED_MODULE_END_2026
+}
+
 setup_c2_feed() {
-    local file choice rc=0 token
-    file=$(mktemp) || return 1
+    local file choice rc=0
+    file=$(mktemp /tmp/xtls-c2-menu.XXXXXX.sh) || return 1
     chmod 600 "$file"
-    if [[ -n "${XTLS_C2_MODULE_PATH:-}" && -f "$XTLS_C2_MODULE_PATH" && ! -L "$XTLS_C2_MODULE_PATH" ]]; then
-        cp -- "$XTLS_C2_MODULE_PATH" "$file" || { rm -f "$file"; return 1; }
-    elif [[ -f /usr/local/sbin/xtls-c2-feed && ! -L /usr/local/sbin/xtls-c2-feed ]]; then
-        cp -- /usr/local/sbin/xtls-c2-feed "$file" || { rm -f "$file"; return 1; }
-    else
-        echo "Репозиторий приватный. Для первой загрузки нужен GitHub token (Contents: Read)."
-        read -r -s -p "GitHub token: " token
-        echo
-        if ! curl -fsSL --retry 2 --connect-timeout 10 --max-time 60 \
-            -H "Authorization: Bearer $token" \
-            -H "Accept: application/vnd.github.raw+json" \
-            "https://api.github.com/repos/djing1e/universal-vps-setup/contents/modules/xtls-c2-feed.sh?ref=main" \
-            -o "$file"; then
-            unset token
-            rm -f "$file"
-            echo "Ошибка загрузки модуля C2 через GitHub API"
-            return 1
-        fi
-        unset token
+    if ! xtls_c2_write_embedded_module > "$file" || ! bash -n "$file"; then
+        rm -f "$file"
+        echo "Ошибка проверки встроенного C2-модуля"
+        return 1
     fi
-    if ! bash -n "$file"; then rm -f "$file"; return 1; fi
-    echo "  1) Установить обновляемый C2 IP:port feed (без блокировки)"
+    echo "  1) Установить C2 IP:port и предложить включить блокировку TCP"
     echo "  2) Статус"
-    echo "  3) Обновить сейчас"
-    echo "  4) Включить блокировку TCP (риск ложных срабатываний)"
+    echo "  3) Обновить IP:port сейчас"
+    echo "  4) Включить блокировку TCP"
     echo "  5) Отключить блокировку TCP"
     echo "  0) Назад"
     read -e -r -p "Выбор: " choice
     case "$choice" in
-        1) bash "$file" install || rc=$? ;;
+        1)
+            if bash "$file" install; then
+                echo ""
+                echo "Установка завершена. Для активации блокировки подтвердите ENABLE-C2-BLOCK."
+                bash "$file" enable-block || rc=$?
+            else
+                rc=$?
+            fi
+            ;;
         2) bash "$file" status || rc=$? ;;
         3) bash "$file" update || rc=$? ;;
         4) bash "$file" enable-block || rc=$? ;;
         5) bash "$file" disable-block || rc=$? ;;
+        0) ;;
+        *) echo "Неверный выбор" ;;
     esac
     rm -f "$file"
     return "$rc"
