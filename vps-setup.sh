@@ -9196,6 +9196,113 @@ setup_c2_feed() {
     return "$rc"
 }
 
+# Independent UDP monitor; no DROP and no unverified C2 port copying.
+xtls_udp_write_embedded_module() {
+cat <<'XTLS_UDP_EMBEDDED_END'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+TABLE=xtls_udp_abuse
+ROOT=/etc/xtls-udp-abuse
+CSV="$ROOT/confirmed-udp.csv"
+prepare() {
+  nft list table ip "$TABLE" >/dev/null 2>&1 || nft add table ip "$TABLE"
+  nft list set ip "$TABLE" udp_pairs >/dev/null 2>&1 || nft 'add set ip xtls_udp_abuse udp_pairs { type ipv4_addr . inet_service; }'
+  nft list chain ip "$TABLE" output >/dev/null 2>&1 || nft 'add chain ip xtls_udp_abuse output { type filter hook output priority -19; policy accept; }'
+  if ! nft list chain ip "$TABLE" output | grep -q 'xtls-udp-observe'; then
+     nft add rule ip "$TABLE" output meta l4proto udp counter comment '"xtls-udp-observe"'
+  fi
+  if ! nft list chain ip "$TABLE" output | grep -q 'xtls-udp-matches'; then
+     nft add rule ip "$TABLE" output ip daddr . udp dport @udp_pairs counter comment '"xtls-udp-matches"'
+  fi
+}
+load() {
+  local tmp count
+  [[ -f "$CSV" ]] || { echo 'No confirmed UDP feed; monitoring only'; return 0; }
+  tmp=$(mktemp -d)
+  python3 - "$CSV" "$tmp/batch" <<'PY'
+import csv,ipaddress,pathlib,sys
+src=pathlib.Path(sys.argv[1])
+out=pathlib.Path(sys.argv[2])
+pairs=set()
+with src.open(newline='') as f:
+    for n,row in enumerate(csv.reader(f),1):
+        if not row or row[0].strip().startswith('#'): continue
+        if len(row)<3 or row[2].strip().lower()!='udp': raise ValueError(f'Line {n}: require IP,port,udp')
+        ip=ipaddress.ip_address(row[0].strip())
+        port=int(row[1].strip())
+        if ip.version!=4 or not ip.is_global or not 1<=port<=65535: raise ValueError(f'Line {n}: invalid address or port')
+        pairs.add((str(ip),port))
+if len(pairs)>50000:raise ValueError('Too many entries')
+with out.open('w') as f:
+    f.write('flush set ip xtls_udp_abuse udp_pairs\n')
+    if pairs:
+        f.write('add element ip xtls_udp_abuse udp_pairs { '+', '.join(f'{ip} . {port}' for ip,port in sorted(pairs))+' }\n')
+print('Confirmed UDP pairs:',len(pairs))
+PY
+  if ! nft -c -f "$tmp/batch"; then rm -rf "$tmp"; return 1; fi
+  nft -f "$tmp/batch"
+  rm -rf "$tmp"
+}
+status() {
+  echo 'UDP monitoring:'
+  nft -a list chain ip "$TABLE" output 2>/dev/null || echo 'not installed'
+  if [[ -f "$CSV" ]];then wc -l "$CSV";else echo 'Confirmed feed: none';fi
+}
+install_module() {
+  install -d -m 700 "$ROOT"
+  prepare
+  load
+  install -m 755 "$0" /usr/local/sbin/xtls-udp-abuse
+  cat > /etc/systemd/system/xtls-udp-abuse-restore.service <<'UNIT'
+[Unit]
+Description=Restore xtlsproVPN UDP abuse monitoring
+After=local-fs.target
+Before=network-pre.target
+Wants=network-pre.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/xtls-udp-abuse restore
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable xtls-udp-abuse-restore.service
+  echo 'UDP monitoring installed; blocking disabled'
+}
+restore() { prepare; load; }
+[[ $(id -u) == 0 ]] || { echo 'Run as root' >&2; exit 1; }
+case "${1:-}" in
+  install) install_module;;
+  restore) restore;;
+  status) status;;
+  *) echo 'Usage: xtls-udp-abuse {install|restore|status}' >&2;exit 2;;
+esac
+XTLS_UDP_EMBEDDED_END
+}
+setup_udp_abuse() {
+    local f choice rc=0
+    f=$(mktemp /tmp/xtls-udp.XXXXXX.sh) || return 1
+    chmod 600 "$f"
+    xtls_udp_write_embedded_module > "$f"
+    if ! bash -n "$f"; then rm -f "$f"; return 1; fi
+    echo "  1) Установить UDP-наблюдение (без DROP)"
+    echo "  2) Статус и счётчики"
+    echo "  3) Перезагрузить подтверждённый UDP CSV"
+    echo "  0) Назад"
+    read -e -r -p "Выбор: " choice
+    case "$choice" in
+      1) bash "$f" install || rc=$? ;;
+      2) bash "$f" status || rc=$? ;;
+      3) if [[ -x /usr/local/sbin/xtls-udp-abuse ]]; then /usr/local/sbin/xtls-udp-abuse restore || rc=$?; else echo "Сначала установите"; fi ;;
+      0) ;;
+      *) echo 'Неверный выбор' ;;
+    esac
+    rm -f "$f"
+    return "$rc"
+}
+
 # =====================================
 # ГЛАВНОЕ МЕНЮ
 # =====================================
@@ -9263,12 +9370,14 @@ while true; do
     echo " 18) Anti-Abuse C2 IP:port — GitHub feed (по умолчанию без DROP)"
     echo "     обновление раз в 6 часов; блокировка включается вручную"
     echo ""
+    echo " 19) UDP Anti-Abuse — наблюдение и подтверждённые индикаторы"
+    echo ""
     echo "  W) 🧹 Полная вычистка (откат всего начисто)"
     echo "     снести все слои перед чистым накатом"
     echo ""
     echo "  0) Выход"
     echo ""
-    read -e -p "Выберите действие [00=всё / 0-18 / W=вычистка]: " MAIN_CHOICE
+    read -e -p "Выберите действие [00=всё / 0-19 / W=вычистка]: " MAIN_CHOICE
 
     case $MAIN_CHOICE in
         00|s|S|star|"*"|★) setup_one_button ;;
@@ -9290,6 +9399,7 @@ while true; do
        16) setup_threat_blocklist ;;
        17) setup_probe_server ;;
        18) setup_c2_feed ;;
+       19) setup_udp_abuse ;;
         W|w|wipe|WIPE) cleanup_legacy ;;
         0) log "=== Выход из vps-setup.sh ==="; echo "Выход."; exit 0 ;;
         *) echo "Неверный выбор." ;;
