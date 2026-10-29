@@ -181,38 +181,49 @@ def behavior():
     all_records = read_recent_access()
     earliest = min((r[0] for r in all_records), default=None)
     latest = max((r[0] for r in all_records), default=None)
+    domain_activity = defaultdict(lambda: {w: [] for w in windows})
     for stamp, proto, dest, port, user, route in all_records:
         age = now - stamp
         if age < -60 or age > max(windows):
             continue
+        host = dest.strip("[]")
         try:
             parsed_port = int(port)
-            host = dest.strip("[]")
-            ip = ipaddress.ip_address(host)
-            if not 1 <= parsed_port <= 65535:
-                invalid += 1
-                continue
-            if not ip.is_global:
-                nonglobal += 1
-                continue
         except ValueError:
-            # Domain names are valid Xray destinations but not numeric IPs.
-            if 1 <= parsed_port <= 65535 and re.fullmatch(r"(?=.{1,253}$)[a-zA-Z0-9_-]+(?:\\.[a-zA-Z0-9_-]+)*\\.?", host):
+            invalid += 1
+            continue
+        if not 1 <= parsed_port <= 65535:
+            invalid += 1
+            continue
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            # Xray can record a domain instead of a resolved IP.
+            # Do not count hostnames as unique scan targets.
+            if re.fullmatch(r"(?=.{1,253}$)[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)*\.?", host):
                 domains += 1
+                for window in windows:
+                    if age <= window:
+                        domain_activity[user][window].append((proto, host.lower(), parsed_port))
             else:
                 invalid += 1
+            continue
+        if not ip.is_global:
+            nonglobal += 1
             continue
         for window in windows:
             if age <= window:
                 activity[user][window].append((proto, host, parsed_port))
 
     results = []
-    for user, per_window in sorted(activity.items()):
+    for user in sorted(set(activity) | set(domain_activity)):
+        per_window = activity[user]
         measures = {}
         suspicious = False
         reasons = []
         for window in windows:
             events = per_window[window]
+            domain_events = domain_activity[user][window]
             destinations = {(proto, host, port) for proto, host, port in events}
             nonweb = [(proto, host, port) for proto, host, port in events
                       if port not in (80, 443, 853)]
@@ -221,6 +232,8 @@ def behavior():
             ssh_ips = {host for proto, host, port in nonweb if proto == "tcp" and port == 22}
             measures[str(window)] = {
                 "connections": len(events),
+                "domain_connections": len(domain_events),
+                "domain_unique_destinations": len(set(domain_events)),
                 "unique_destinations": len(destinations),
                 "nonweb_connections": len(nonweb),
                 "nonweb_ips": len(nonweb_ips),
@@ -250,13 +263,13 @@ def behavior():
         "source": str(ACCESS),
         "max_access_bytes": MAX_ACCESS_BYTES,
         "window_seconds": list(windows),
-        "subscriptions_seen": len(activity),
+        "subscriptions_seen": len(set(activity) | set(domain_activity)),
         "access_log_first_utc": dt.datetime.fromtimestamp(earliest, dt.timezone.utc).isoformat() if earliest is not None else None,
         "access_log_last_utc": dt.datetime.fromtimestamp(latest, dt.timezone.utc).isoformat() if latest is not None else None,
         "access_log_span_seconds": round(latest - earliest) if earliest is not None and latest is not None else 0,
         "oldest_record_age_seconds": round(now - earliest) if earliest is not None else None,
         "full_30min_coverage": earliest is not None and earliest <= now - 1800 and latest >= now - 60,
-        "domain_destinations_excluded": domains,
+        "domain_destinations_excluded_from_ip_heuristics": domains,
         "non_global_ip_destinations_excluded": nonglobal,
         "suspected": results,
         "skipped_invalid_destinations": invalid,
