@@ -4,10 +4,14 @@ on:
   push:
     paths:
       - 'vps-setup.sh'
+      - 'modules/**'
+      - 'tests/**'
       - '.github/workflows/bash-syntax.yml'
   pull_request:
     paths:
       - 'vps-setup.sh'
+      - 'modules/**'
+      - 'tests/**'
       - '.github/workflows/bash-syntax.yml'
   workflow_dispatch:
 
@@ -26,3 +30,9 @@ jobs:
         run: |
           bash -n vps-setup.sh
           echo 'Bash syntax OK'
+      - name: Auto Abuse Guard syntax and regression tests
+        shell: bash
+        run: |
+          bash -n modules/xtls-auto-abuse-guard-install.sh
+          python3 -m py_compile modules/xtls-auto-abuse-guard.py
+          sudo python3 -m unittest discover -s tests -v

@@ -7,23 +7,28 @@ TIMER=/etc/systemd/system/xtls-auto-abuse-guard.timer
 DROPIN_DIR=/etc/systemd/system/xtls-auto-abuse-guard.service.d
 LEGACY_DROPIN=$DROPIN_DIR/20-behavior.conf
 legacy_dropin_matches() {
-  [[ -f "$LEGACY_DROPIN" ]] || return 1
+  [[ -f "$LEGACY_DROPIN" && ! -L "$LEGACY_DROPIN" ]] || return 1
   [[ "$(cat "$LEGACY_DROPIN")" == "$(printf "%s\n" "[Service]" "ExecStart=" "ExecStart=/usr/bin/python3 /usr/local/sbin/xtls-auto-abuse-guard scan" "ExecStart=/usr/bin/python3 /usr/local/sbin/xtls-auto-abuse-guard behavior-record")" ]]
 }
 check_dropins() {
   local f
   [[ -d "$DROPIN_DIR" ]] || return 0
   while IFS= read -r -d "" f; do
+    if [[ -L "$f" ]]; then
+      echo "Symlink drop-in requires manual review: $f" >&2; return 1
+    fi
     if grep -Eq "^[[:space:]]*ExecStart[[:space:]]*=" "$f"; then
       if [[ "$f" == "$LEGACY_DROPIN" ]] && legacy_dropin_matches; then continue; fi
       echo "Unknown ExecStart override: $f; refusing update" >&2
       return 1
     fi
-  done < <(find "$DROPIN_DIR" -maxdepth 1 -type f -name "*.conf" -print0)
+  done < <(find "$DROPIN_DIR" -maxdepth 1 \( -type f -o -type l \) -name "*.conf" -print0)
 }
 require_root() { if (( EUID != 0 )); then echo "Run as root" >&2; exit 1; fi; }
 install_guard() (
   require_root
+  exec 9>/run/xtls-auto-abuse-guard-install.lock
+  flock -n 9 || { echo "Another installer is running" >&2; return 1; }
   command -v python3 >/dev/null
   command -v journalctl >/dev/null
   command -v curl >/dev/null
@@ -31,10 +36,14 @@ install_guard() (
   tmp=$(mktemp)
   trap 'rm -f "$tmp"' EXIT
   curl -fsSL --connect-timeout 10 --max-time 40 "$SCRIPT_URL" -o "$tmp"
-  python3 -m py_compile "$tmp"
+  python3 -c 'import sys; compile(open(sys.argv[1], "rb").read(), sys.argv[1], "exec")' "$tmp"
   grep -q 'incident_id' "$tmp" || { echo "Incident ID support missing" >&2; return 1; }
   grep -q 'behavior-record' "$tmp" || { echo "Behavior support missing" >&2; return 1; }
   check_dropins
+  local path
+  for path in "$TARGET" "$SERVICE" "$TIMER" "$DROPIN_DIR"; do
+    [[ ! -L "$path" ]] || { echo "Symlink requires manual review: $path" >&2; return 1; }
+  done
   local backup_dir
   backup_dir=$(mktemp -d /root/xtls-guard-backup.XXXXXXXX)
   [[ ! -f "$TARGET" ]] || cp -a "$TARGET" "$backup_dir/xtls-auto-abuse-guard"
@@ -46,7 +55,7 @@ install_guard() (
   systemctl is-enabled --quiet xtls-auto-abuse-guard.timer && was_enabled=yes || true
   systemctl is-active --quiet xtls-auto-abuse-guard.timer && was_active=yes || true
   rollback() {
-    local rc=$?
+    local rc="$1"
     if [[ "$committed" != yes && $rc -ne 0 ]]; then
       echo "Update failed (exit=$rc); restoring unit files and executable" >&2
       if [[ -e "$backup_dir/xtls-auto-abuse-guard" ]]; then
@@ -58,8 +67,11 @@ install_guard() (
       if [[ -e "$backup_dir/xtls-auto-abuse-guard.timer" ]]; then
         cp -a "$backup_dir/xtls-auto-abuse-guard.timer" "$TIMER"
       else rm -f "$TIMER"; fi
-      rm -rf "$DROPIN_DIR"
-      if [[ -d "$backup_dir/dropins" ]]; then cp -a "$backup_dir/dropins" "$DROPIN_DIR"; fi
+      # Only our exact legacy override is migrated; never replace foreign files.
+      if [[ -f "$backup_dir/dropins/20-behavior.conf" ]] &&
+         [[ ! -e "$LEGACY_DROPIN" && ! -L "$LEGACY_DROPIN" ]]; then
+        cp -a "$backup_dir/dropins/20-behavior.conf" "$LEGACY_DROPIN"
+      fi
       systemctl daemon-reload || true
       if [[ "$was_enabled" == yes ]]; then systemctl enable xtls-auto-abuse-guard.timer || true
       else systemctl disable xtls-auto-abuse-guard.timer || true; fi
@@ -68,7 +80,10 @@ install_guard() (
       echo "Rollback attempted; backup: $backup_dir" >&2
     fi
   }
-  trap rollback EXIT
+  trap 'rc=$?; rollback "$rc"; rm -f "$tmp"; exit "$rc"' EXIT
+  # Quiesce only this observer before replacing its executable and units.
+  if [[ -e "$TIMER" ]]; then systemctl stop xtls-auto-abuse-guard.timer; fi
+  if [[ -e "$SERVICE" ]]; then systemctl stop xtls-auto-abuse-guard.service; fi
   install -o root -g root -m 0755 "$tmp" "$TARGET"
   cat > "$SERVICE" <<'UNIT'
 [Unit]
