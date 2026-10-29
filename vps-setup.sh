@@ -8971,6 +8971,50 @@ elif [[ ${1:-} == --test-crowdsec ]]; then
     exit $?
 fi
 
+# Optional C2 IP:port feed, independent of CrowdSec and existing firewall.
+setup_c2_feed() {
+    local file choice rc=0 token
+    file=$(mktemp) || return 1
+    chmod 600 "$file"
+    if [[ -n "${XTLS_C2_MODULE_PATH:-}" && -f "$XTLS_C2_MODULE_PATH" && ! -L "$XTLS_C2_MODULE_PATH" ]]; then
+        cp -- "$XTLS_C2_MODULE_PATH" "$file" || { rm -f "$file"; return 1; }
+    elif [[ -f /usr/local/sbin/xtls-c2-feed && ! -L /usr/local/sbin/xtls-c2-feed ]]; then
+        cp -- /usr/local/sbin/xtls-c2-feed "$file" || { rm -f "$file"; return 1; }
+    else
+        echo "Репозиторий приватный. Для первой загрузки нужен GitHub token (Contents: Read)."
+        read -r -s -p "GitHub token: " token
+        echo
+        if ! curl -fsSL --retry 2 --connect-timeout 10 --max-time 60 \
+            -H "Authorization: Bearer $token" \
+            -H "Accept: application/vnd.github.raw+json" \
+            "https://api.github.com/repos/djing1e/universal-vps-setup/contents/modules/xtls-c2-feed.sh?ref=main" \
+            -o "$file"; then
+            unset token
+            rm -f "$file"
+            echo "Ошибка загрузки модуля C2 через GitHub API"
+            return 1
+        fi
+        unset token
+    fi
+    if ! bash -n "$file"; then rm -f "$file"; return 1; fi
+    echo "  1) Установить обновляемый C2 IP:port feed (без блокировки)"
+    echo "  2) Статус"
+    echo "  3) Обновить сейчас"
+    echo "  4) Включить блокировку TCP (риск ложных срабатываний)"
+    echo "  5) Отключить блокировку TCP"
+    echo "  0) Назад"
+    read -e -r -p "Выбор: " choice
+    case "$choice" in
+        1) bash "$file" install || rc=$? ;;
+        2) bash "$file" status || rc=$? ;;
+        3) bash "$file" update || rc=$? ;;
+        4) bash "$file" enable-block || rc=$? ;;
+        5) bash "$file" disable-block || rc=$? ;;
+    esac
+    rm -f "$file"
+    return "$rc"
+}
+
 # =====================================
 # ГЛАВНОЕ МЕНЮ
 # =====================================
@@ -9035,12 +9079,15 @@ while true; do
     echo "     временный HTTP/HTTPS на своих портах, лог подключений;"
     echo "     проверить новый IP на блок ДО того как вешать домен"
     echo ""
+    echo " 18) Anti-Abuse C2 IP:port — GitHub feed (по умолчанию без DROP)"
+    echo "     обновление раз в 6 часов; блокировка включается вручную"
+    echo ""
     echo "  W) 🧹 Полная вычистка (откат всего начисто)"
     echo "     снести все слои перед чистым накатом"
     echo ""
     echo "  0) Выход"
     echo ""
-    read -e -p "Выберите действие [00=всё / 0-17 / W=вычистка]: " MAIN_CHOICE
+    read -e -p "Выберите действие [00=всё / 0-18 / W=вычистка]: " MAIN_CHOICE
 
     case $MAIN_CHOICE in
         00|s|S|star|"*"|★) setup_one_button ;;
@@ -9061,6 +9108,7 @@ while true; do
        15) setup_antiddos ;;
        16) setup_threat_blocklist ;;
        17) setup_probe_server ;;
+       18) setup_c2_feed ;;
         W|w|wipe|WIPE) cleanup_legacy ;;
         0) log "=== Выход из vps-setup.sh ==="; echo "Выход."; exit 0 ;;
         *) echo "Неверный выбор." ;;
