@@ -9274,7 +9274,7 @@ UNIT
 }
 restore() { prepare; load; if [[ -f "$ROOT/mode" && $(cat "$ROOT/mode") == block && -s "$CSV" ]]; then enable_block; fi; }
 udp_drop_handle() {
- nft -a list chain ip "$TABLE" output 2>/dev/null | sed -n '/xtls-udp-block/s/.*# handle \\([0-9][0-9]*\\).*/\\1/p' | head -1
+ nft -a list chain ip "$TABLE" output 2>/dev/null | awk '/comment "xtls-udp-block"/ {for(i=1;i<=NF;i++) if($i=="handle") {print $(i+1); exit}}'
 }
 enable_block() {
   install -d -m 700 "$ROOT"
@@ -9290,8 +9290,11 @@ enable_block() {
 disable_block() {
   local h
   printf '%s\n' observe > "$ROOT/mode"
-  h=$(udp_drop_handle)
-  [[ -z "$h" ]] || nft delete rule ip "$TABLE" output handle "$h"
+  while :; do
+    h=$(udp_drop_handle)
+    [[ -n "$h" ]] || break
+    nft delete rule ip "$TABLE" output handle "$h"
+  done
   echo 'UDP DROP disabled'
 }
 [[ $(id -u) == 0 ]] || { echo 'Run as root' >&2; exit 1; }
