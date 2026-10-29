@@ -9334,6 +9334,60 @@ setup_udp_abuse() {
     return "$rc"
 }
 
+# Unified management only: no migration or firewall changes.
+setup_antiabuse_center() {
+    local choice
+    while true; do
+        echo ""
+        echo "=== Anti-Abuse & Threat Intelligence ==="
+        echo "  1) Spamhaus + FireHOL L1 (INPUT)"
+        echo "  2) TCP C2 Anti-Abuse (OUTPUT)"
+        echo "  3) UDP Anti-Abuse (OUTPUT)"
+        echo "  4) Общий статус (только чтение)"
+        echo "  0) Назад"
+        read -e -r -p "Выберите [0-4]: " choice || return 0
+        case "$choice" in
+            1) setup_threat_blocklist ;;
+            2) setup_c2_feed ;;
+            3) setup_udp_abuse ;;
+            4) antiabuse_center_status ;;
+            0) return 0 ;;
+            *) echo "Неверный выбор" ;;
+        esac
+    done
+}
+antiabuse_center_status() {
+    local name count
+    echo "===== THREAT-INTEL INPUT ====="
+    for name in threat-block-v4 threat-block-v6; do
+        if ipset list "$name" >/dev/null 2>&1; then
+            count=$(ipset list "$name" | awk '/^Number of entries:/ {print $4}')
+            printf '%s: %s entries\n' "$name" "$count"
+        else
+            printf '%s: not installed\n' "$name"
+        fi
+    done
+    iptables -C INPUT -m set --match-set threat-block-v4 src -m conntrack --ctstate NEW -j DROP >/dev/null 2>&1 \
+        && echo "IPv4 INPUT DROP: active" || echo "IPv4 INPUT DROP: inactive"
+    ip6tables -C INPUT -m set --match-set threat-block-v6 src -m conntrack --ctstate NEW -j DROP >/dev/null 2>&1 \
+        && echo "IPv6 INPUT DROP: active" || echo "IPv6 INPUT DROP: inactive"
+    echo "Threat timer:"
+    systemctl is-enabled threat-blacklist-update.timer 2>/dev/null || true
+    echo "===== TCP C2 OUTPUT ====="
+    if [[ -x /usr/local/sbin/xtls-c2-feed ]]; then
+        /usr/local/sbin/xtls-c2-feed status
+    else
+        echo "Not installed"
+    fi
+    echo "===== UDP OUTPUT ====="
+    if [[ -x /usr/local/sbin/xtls-udp-abuse ]]; then
+        /usr/local/sbin/xtls-udp-abuse status
+    else
+        echo "Not installed"
+    fi
+    echo "Spamhaus/FireHOL OUTPUT DROP is not enabled by this menu."
+}
+
 # =====================================
 # ГЛАВНОЕ МЕНЮ
 # =====================================
@@ -9391,17 +9445,17 @@ while true; do
     echo " 15) Anti-DDoS — nft per-IP лимиты + fleet-sync"
     echo "     поверх UFW/CrowdSec: SYN/UDP-флуд, connlimit"
     echo ""
-    echo " 16) Threat-Intel блоклист (Spamhaus + FireHOL L1)"
-    echo "     глобальные malware-сети, ipset+iptables"
+    echo " 16) Anti-Abuse & Threat Intelligence — Spamhaus / TCP C2 / UDP"
+    echo "     единый раздел управления и общий статус"
     echo ""
     echo " 17) Probe-сервер — доступность IP снаружи/из РФ"
     echo "     временный HTTP/HTTPS на своих портах, лог подключений;"
     echo "     проверить новый IP на блок ДО того как вешать домен"
     echo ""
-    echo " 18) Anti-Abuse C2 IP:port — GitHub feed (по умолчанию без DROP)"
+    echo " 18) TCP C2 Anti-Abuse — прямой вход (также в п.16)"
     echo "     обновление раз в 6 часов; блокировка включается вручную"
     echo ""
-    echo " 19) UDP Anti-Abuse — наблюдение и подтверждённые индикаторы"
+    echo " 19) UDP Anti-Abuse — прямой вход (также в п.16)"
     echo ""
     echo "  W) 🧹 Полная вычистка (откат всего начисто)"
     echo "     снести все слои перед чистым накатом"
@@ -9427,7 +9481,7 @@ while true; do
        13) setup_warp ;;
        14) setup_kernel_tuning ;;
        15) setup_antiddos ;;
-       16) setup_threat_blocklist ;;
+       16) setup_antiabuse_center ;;
        17) setup_probe_server ;;
        18) setup_c2_feed ;;
        19) setup_udp_abuse ;;
