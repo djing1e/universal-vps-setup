@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "components": {
+    "auto-abuse-guard": {
+      "version": "1.0.0-rc.1",
+      "source_revision": "ca2b64c0abf531f0c29e599055b351cf5bbd1fae",
+      "resources": {
+        "/usr/local/sbin/xtls-auto-abuse-guard": {
+          "sha256": "f9eb32909626917a708a66907df0debf7cfc1943e626e7974e03e697996bcd03",
+          "allowed_modes": [
+            493
+          ]
+        },
+        "/etc/systemd/system/xtls-auto-abuse-guard.service": {
+          "sha256": "f89fff2d6b9803d06c57d6d0a153be7f10161445c380576c51f78c6e2e0d724f",
+          "allowed_modes": [
+            384,
+            420
+          ]
+        },
+        "/etc/systemd/system/xtls-auto-abuse-guard.timer": {
+          "sha256": "2ca974bd2f4a9b8991c29ecb34d65a9fa88c33350075b25d4d4c43f12f3db7f1",
+          "allowed_modes": [
+            384,
+            420
+          ]
+        }
+      }
+    }
+  }
+}

@@ -44,3 +44,11 @@ Spamhaus распознаются хеши предыдущего и текущ�
 Новый restore unit UDP и опциональные службы наблюдения включены в список служб.
 Неполный ответ systemd остаётся unknown; для Docker нужны подтверждённые
 LoadState=loaded, ActiveState=active и непустой SubState.
+
+Поле component_registry добавляет сведения о локальной регистрации Guard:
+recognized_unregistered, registered_matches, registered_drift или unknown.
+Регистрация не выполняется аудитом автоматически. Запись и версия относятся
+ровно к executable/service/timer, не к настройкам, истории или firewall.
+Операция отдельной явной регистрации описана в docs/module-registry.md.
+Наличие записи не открывает update_gate и не меняет смысл старого поля modules:
+known_content по-прежнему означает только распознанный хеш.

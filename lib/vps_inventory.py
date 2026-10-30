@@ -172,6 +172,15 @@ def os_identity(root):
     return {'status': 'observed' if fields else 'unknown', 'properties': fields}
 
 
+def registration_observation(root):
+    try:
+        from module_registry import inspect
+        return {'auto-abuse-guard': inspect(root)}
+    except (ImportError,OSError,ValueError,TypeError,KeyError):
+        return {'auto-abuse-guard': {'status':'unknown','reason':'registry_catalog_unavailable',
+                                   'changes_applied':False,'automatic_update':False}}
+
+
 def collect(root=Path('/'), runner=probe, manifest=None):
     if manifest is None:
         manifest = json.loads(Path(__file__).with_name('inventory_manifest.json').read_text())
@@ -192,6 +201,7 @@ def collect(root=Path('/'), runner=probe, manifest=None):
         'mode': 'audit', 'changes_applied': False,
         'os': os_identity(root), 'kernel': os.uname().release,
         'modules': files, 'services': units, 'probes': observations,
+        'component_registry': registration_observation(root),
         'saved_modes': {path: saved_mode(root/path.lstrip('/'), allowed)
                         for path, allowed in SAVED_MODES.items()},
         'update_gate': 'manual_review_required',
