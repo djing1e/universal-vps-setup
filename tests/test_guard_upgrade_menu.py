@@ -1,5 +1,6 @@
 """Exercise the actual Bash menu wrapper with pinned fixture downloads/fake updater."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -20,6 +21,11 @@ class GuardMenuTests(unittest.TestCase):
                       FIXTURE_ROOT=str(ROOT),CALLS=str(self.calls))
         self.source='guard_engine_menu_action() ('+SOURCE.split('guard_engine_menu_action() (',1)[1].split('setup_auto_abuse_guard() {',1)[0]
         self.source=self.source.replace('/tmp/xtls-guard-upgrade.',str(self.root/'bundle.'))
+        # Production intentionally pins the older reviewed bundle. This isolated
+        # wrapper test supplies the current local helper as its download fixture.
+        self.source=self.source.replace(
+            'a182c62db4cd8fd6f6e364d992d468ce2a2647724acf0e7444de41c205824ed9',
+            hashlib.sha256((ROOT/'lib/vps_inventory.py').read_bytes()).hexdigest())
         self.tool('curl', '''from pathlib import Path
 if os.environ.get('FAIL_DOWNLOAD'): sys.exit(22)
 url=sys.argv[-3];name=url.split('/')[-1]
