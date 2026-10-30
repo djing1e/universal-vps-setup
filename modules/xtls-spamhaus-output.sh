@@ -56,7 +56,7 @@ PY
   install -m 600 "$d/cidr4" "$ROOT/cidr4"
   install -m 600 "$d/cidr6" "$ROOT/cidr6"
   printf '%s\n' "$(date -u '+%FT%TZ')" > "$ROOT/last-success"
-  echo "Spamhaus OUTPUT observation updated (no DROP)"
+  echo "Spamhaus destination sets updated; existing filtering rules and UDP mode unchanged"
 )
 install_module() {
   command -v nft >/dev/null || { echo 'nft is required' >&2; return 1; }
@@ -179,7 +179,7 @@ PY
   nft -c -f "$d/batch"
   nft -f "$d/batch"
   printf '%s\n' enabled > "$ROOT/diagnostics-mode"
-  echo "Spamhaus original-direction logging enabled (2/minute per family, burst 5; no DROP)"
+  echo "Spamhaus original-direction logging enabled (2/minute per family, burst 5); filtering rules unchanged"
 )
 diagnostics_disable() {
   local handle

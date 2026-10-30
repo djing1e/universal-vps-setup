@@ -9414,7 +9414,7 @@ PY
   install -m 600 "$d/cidr4" "$ROOT/cidr4"
   install -m 600 "$d/cidr6" "$ROOT/cidr6"
   printf '%s\n' "$(date -u '+%FT%TZ')" > "$ROOT/last-success"
-  echo "Spamhaus OUTPUT observation updated (no DROP)"
+  echo "Spamhaus destination sets updated; existing filtering rules and UDP mode unchanged"
 )
 install_module() {
   command -v nft >/dev/null || { echo 'nft is required' >&2; return 1; }
@@ -9537,7 +9537,7 @@ PY
   nft -c -f "$d/batch"
   nft -f "$d/batch"
   printf '%s\n' enabled > "$ROOT/diagnostics-mode"
-  echo "Spamhaus original-direction logging enabled (2/minute per family, burst 5; no DROP)"
+  echo "Spamhaus original-direction logging enabled (2/minute per family, burst 5); filtering rules unchanged"
 )
 diagnostics_disable() {
   local handle
@@ -9783,6 +9783,9 @@ spamhaus_udp_keep() {
     [[ "$answer" == KEEP-UDP-DROP ]] || { echo 'Защитный таймер оставлен'; return 0; }
     if systemctl is-active --quiet xtls-sh-udp-safety.timer; then
         systemctl stop xtls-sh-udp-safety.timer || return 1
+        echo 'Таймер автоотключения остановлен. Текущий режим:'
+    else
+        echo 'Активного таймера автоотключения нет. Текущий режим:'
     fi
     /usr/bin/python3 /usr/local/sbin/xtls-spamhaus-udp status
 }
@@ -9834,28 +9837,34 @@ setup_spamhaus_out_observe() {
     chmod 700 "$f"
     xtls_spamhaus_out_write_module > "$f"
     if ! bash -n "$f"; then rm -f "$f"; return 1; fi
-    echo "1) Установить / обновить Spamhaus OUTPUT (режим UDP сохраняется)"
-    echo "2) Обновить фид сейчас"
-    echo "3) Статус и счётчики"
-    echo "4) Включить ограниченное журналирование совпадений"
-    echo "5) Отключить журналирование"
-    echo "6) Последние события (2 часа)"
-    echo "7) Отчёт: Spamhaus + Remnanode (по запросу)"
-    echo "0) Назад"
-    read -e -r -p "Выбор: " choice || { rm -f "$f"; return 0; }
-    case "$choice" in
-        1) bash "$f" install || rc=$? ;;
-        2) if [[ -x /usr/local/sbin/xtls-spamhaus-output ]]; then /usr/local/sbin/xtls-spamhaus-output update || rc=$?; else echo "Сначала установите"; rc=1; fi ;;
-        3) spamhaus_output_summary || rc=$? ;;
-        4) bash "$f" diagnostics-enable || rc=$? ;;
-        5) bash "$f" diagnostics-disable || rc=$? ;;
-        6) bash "$f" diagnostics-show || rc=$? ;;
-        7) bash "$f" diagnostics-report || rc=$? ;;
-        0) ;;
-        *) echo "Неверный выбор" ;;
-    esac
+    while true; do
+        rc=0
+        echo "=== Spamhaus: сети и журнал совпадений ==="
+        echo "Журналирование не меняет режим UDP DROP (управление: 16 → 3)."
+        echo "1) Установить / обновить Spamhaus OUTPUT (режим UDP сохраняется)"
+        echo "2) Обновить фид сейчас"
+        echo "3) Статус и счётчики"
+        echo "4) Включить ограниченное журналирование совпадений"
+        echo "5) Отключить журналирование"
+        echo "6) Последние события (2 часа)"
+        echo "7) Отчёт: Spamhaus + Remnanode (по запросу)"
+        echo "0) Назад"
+        read -e -r -p "Выбор [0-7]: " choice || break
+        case "$choice" in
+            1) bash "$f" install || rc=$? ;;
+            2) if [[ -x /usr/local/sbin/xtls-spamhaus-output ]]; then /usr/local/sbin/xtls-spamhaus-output update || rc=$?; else echo "Сначала установите"; rc=1; fi ;;
+            3) spamhaus_output_summary || rc=$? ;;
+            4) bash "$f" diagnostics-enable || rc=$? ;;
+            5) bash "$f" diagnostics-disable || rc=$? ;;
+            6) bash "$f" diagnostics-show || rc=$? ;;
+            7) bash "$f" diagnostics-report || rc=$? ;;
+            0) break ;;
+            *) echo "Неверный выбор" ;;
+        esac
+        if (( rc != 0 )); then echo "Действие завершилось с ошибкой ($rc); проверьте статус."; fi
+    done
     rm -f "$f"
-    return "$rc"
+    return 0
 }
 
 setup_auto_abuse_guard() {
@@ -9872,14 +9881,22 @@ setup_auto_abuse_guard() {
         echo "=== Auto Abuse Guard (только Observe, без блокировок) ==="
         echo "1) Установить / включить таймер"
         echo "2) Статус / последние наблюдения"
-        echo "3) Выполнить сканирование сейчас"
+        echo "3) Проверить сейчас: Spamhaus + поведение подписок"
         echo "4) Отключить и удалить сервис (логи сохранить)"
         echo "0) Назад"
         read -e -r -p "Выбор: " choice || break
         case "$choice" in
             1) bash "$installer" install ;;
             2) bash "$installer" status ;;
-            3) if [[ -x /usr/local/sbin/xtls-auto-abuse-guard ]]; then /usr/bin/python3 /usr/local/sbin/xtls-auto-abuse-guard scan; else echo "Сначала установите модуль"; fi ;;
+            3) if [[ -x /usr/local/sbin/xtls-auto-abuse-guard ]]; then
+                   if systemctl start xtls-auto-abuse-guard.service; then
+                       echo "Проверка завершена. Последний результат:"
+                       systemctl show xtls-auto-abuse-guard.service --no-pager -p Result -p ExecMainStatus
+                       journalctl -u xtls-auto-abuse-guard.service -n 8 --no-pager -o cat
+                   else
+                       echo "Проверка не завершена; проверьте журнал службы."
+                   fi
+               else echo "Сначала установите модуль"; fi ;;
             4) bash "$installer" remove ;;
             0) break ;;
             *) echo "Неверный выбор" ;;
@@ -10006,6 +10023,25 @@ antiabuse_center_status() {
         echo "Not installed"
     fi
     spamhaus_output_summary || true
+    echo "===== AUTO ABUSE GUARD (АНАЛИЗ, БЕЗ АВТОБАНА) ====="
+    if [[ -x /usr/local/sbin/xtls-auto-abuse-guard ]]; then
+        systemctl show xtls-auto-abuse-guard.timer --no-pager -p UnitFileState -p ActiveState
+        systemctl show xtls-auto-abuse-guard.service --no-pager -p Result -p ExecMainStatus
+    else
+        echo "Не установлен"
+    fi
+    echo "===== SMTP25 GUARD ====="
+    if [[ -x /usr/local/sbin/xtls-smtp25-guard ]]; then
+        /usr/local/sbin/xtls-smtp25-guard status || echo "Не удалось прочитать статус"
+    else
+        echo "Не установлен (опционально)"
+    fi
+    echo "===== PORT SCAN OBSERVE ====="
+    if [[ -x /usr/local/sbin/xtls-portscan-observe ]]; then
+        /usr/local/sbin/xtls-portscan-observe status || echo "Не удалось прочитать статус"
+    else
+        echo "Не установлен (опционально)"
+    fi
 }
 
 # =====================================
