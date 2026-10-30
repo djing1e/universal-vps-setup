@@ -5,12 +5,14 @@ on:
     paths:
       - 'vps-setup.sh'
       - 'modules/**'
+      - 'lib/**'
       - 'tests/**'
       - '.github/workflows/bash-syntax.yml'
   pull_request:
     paths:
       - 'vps-setup.sh'
       - 'modules/**'
+      - 'lib/**'
       - 'tests/**'
       - '.github/workflows/bash-syntax.yml'
   workflow_dispatch:
