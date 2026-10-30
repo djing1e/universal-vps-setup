@@ -18,7 +18,10 @@ Commands: enable-block, disable-block, restore, status. No command installs unit
 or starts/enables services automatically. The executable is deployed separately to
 /usr/local/sbin/xtls-spamhaus-udp. The supplied restore unit runs after and requires
 xtls-spamhaus-output-restore.service. Deployment and enabling are explicit steps.
-Menu: 16 -> 5 -> 8. The installer uses pinned files and SHA256, refuses unknown
+Menu: 16 -> 3. UDP DROP is directly accessible, with status first, enable/disable
+next, and installation under item 9. Old confirmed UDP IP:port handling is separate
+under 16 -> 9; datasets/logging are under 16 -> 5. Item 6 cancels the safety timer
+after access checks, retaining its previous number for the active test workflow. The installer uses pinned files and SHA256, refuses unknown
 existing executables/units or symlinks, and preserves matching installations and
 local exemptions/mode. Fresh installation stays in observe. Merely opening the
 menu changes nothing.
