@@ -67,7 +67,7 @@ class InventoryTests(unittest.TestCase):
         calls=[]
         def runner(argv):
             calls.append(argv)
-            return {'status':'ok','output':'LoadState=loaded\nActiveState=active\n'}
+            return {'status':'ok','output':'LoadState=loaded\nActiveState=active\nSubState=running\n'}
         inventory.collect(self.root, runner, {'files':[]})
         for argv in calls:
             if argv[0]=='systemctl':
@@ -95,11 +95,46 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, '')
 
+    def test_incomplete_active_docker_is_not_queried(self):
+        calls = []
+        def runner(argv):
+            calls.append(argv)
+            return {'status': 'ok', 'output': 'LoadState=loaded\nActiveState=active\n'}
+        report = inventory.collect(self.root, runner, {'files': []})
+        self.assertEqual(report['services']['docker.service']['status'], 'unknown')
+        self.assertEqual(report['probes']['containers']['status'], 'unknown')
+        self.assertFalse(any('ps' in argv for argv in calls))
+
+    def test_saved_modes_report_intent_without_executing_modules(self):
+        config = self.root/'etc/xtls-spamhaus-udp'
+        config.mkdir(parents=True)
+        path = config/'mode'
+        path.write_text('block\n')
+        report = inventory.collect(self.root, lambda argv: {'status': 'unavailable'}, {'files': []})
+        self.assertEqual(report['saved_modes']['/etc/xtls-spamhaus-udp/mode'],
+                         {'status': 'observed', 'value': 'block', 'scope': 'saved_only'})
+        self.assertFalse(report['changes_applied'])
+        self.assertEqual(report['update_gate'], 'manual_review_required')
+        self.assertEqual(path.read_text(), 'block\n')
+        self.assertIn('xtls-spamhaus-udp-restore.service', report['services'])
+
+    def test_saved_mode_unknown_absent_and_symlink_stay_distinct(self):
+        path = self.root/'mode'
+        read = lambda: inventory.saved_mode(path, ('observe', 'block'))
+        self.assertEqual(read()['status'], 'absent')
+        for value in ('', 'unexpected', 'x'*300):
+            path.write_text(value)
+            self.assertEqual(read()['status'], 'unknown')
+        path.unlink()
+        path.symlink_to(self.root/'absent')
+        self.assertEqual(read()['status'], 'unknown')
+
     def test_manifest_matches_release_sources(self):
         manifest=json.loads((ROOT/'lib/inventory_manifest.json').read_text())
         mapping={'xtls-c2-feed':'xtls-c2-feed.sh',
                  'xtls-spamhaus-output':'xtls-spamhaus-output.sh',
-                 'xtls-auto-abuse-guard':'xtls-auto-abuse-guard.py'}
+                 'xtls-auto-abuse-guard':'xtls-auto-abuse-guard.py',
+                 'xtls-spamhaus-udp':'xtls-spamhaus-udp.py'}
         for item in manifest['files']:
             source=ROOT/'modules'/mapping[Path(item['path']).name]
             self.assertIn(hashlib.sha256(source.read_bytes()).hexdigest(),item['sha256'])

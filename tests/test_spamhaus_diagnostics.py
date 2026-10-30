@@ -42,7 +42,7 @@ if '-f' not in a:
 batch=pathlib.Path(a[-1]).read_text()
 if '-c' in a:
     if os.environ.get('FAIL_CHECK'): sys.exit(1)
-    assert batch.count('ct direction original')==2
+    if 'xtls-sh-diag-' in batch: assert batch.count('ct direction original')==2
     assert ' drop' not in batch and 'flush' not in batch
     sys.exit(0)
 if os.environ.get('FAIL_APPLY'): sys.exit(1)
@@ -80,6 +80,43 @@ p.write_text(json.dumps(rules))
                 self.assertNotEqual(r.returncode, 0)
                 self.assertEqual(json.loads(self.rules.read_text()), self.initial)
                 self.assertFalse((self.root/'state/diagnostics-mode').exists())
+
+    def run_prepare(self, **env):
+        source = self.script.read_text().split('case "${1:-}" in', 1)[0]
+        return subprocess.run(['bash', '-c', source+'\nprepare'],
+                              env=self.env | env, capture_output=True, text=True)
+
+    def test_prepare_removes_counter_duplicates_keeps_oldest_and_foreign_rules(self):
+        extra = [
+            {'handle': 20, 'comment': 'xtls-sh-out-v4', 'counter': 99},
+            {'handle': 21, 'comment': 'xtls-sh-out-v6', 'counter': 88},
+            {'handle': 22, 'comment': 'xtls-sh-udp-drop-v4'},
+            {'handle': 23, 'comment': 'local-xtls-sh-out-v4'},
+        ]
+        self.rules.write_text(json.dumps(self.initial+extra))
+        expected = self.initial+extra[2:]
+        for _ in range(2):
+            r = self.run_prepare()
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(self.rules.read_text()), expected)
+
+    def test_prepare_adds_only_missing_family_counter(self):
+        rows = [r for r in self.initial if r['comment']!='xtls-sh-out-v6']
+        self.rules.write_text(json.dumps(rows))
+        r = self.run_prepare()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        result = json.loads(self.rules.read_text())
+        self.assertEqual(result[:-1], rows)
+        self.assertEqual(result[-1]['comment'], 'xtls-sh-out-v6')
+
+    def test_prepare_failure_preserves_existing_counters_and_drop(self):
+        initial = self.initial + [{'handle': 20, 'comment': 'xtls-sh-out-v4'},
+                                  {'handle': 21, 'comment': 'xtls-sh-udp-drop-v4'}]
+        for failure in ('FAIL_READ', 'FAIL_CHECK', 'FAIL_APPLY'):
+            self.rules.write_text(json.dumps(initial))
+            r = self.run_prepare(**{failure:'1'})
+            self.assertNotEqual(r.returncode, 0)
+            self.assertEqual(json.loads(self.rules.read_text()), initial)
 
     def test_embedded_copy_matches_module(self):
         text = (ROOT/'vps-setup.sh').read_text()

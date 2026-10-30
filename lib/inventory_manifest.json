@@ -1,5 +1,5 @@
 {
-  "reference_commit": "db9a8a164216f7f3b39a6e59f290ad2c94682510",
+  "reference_commit": "5e5b47c6693c1e51634c3ba8017aa4923b561ee9",
   "files": [
     {
       "path": "/usr/local/sbin/xtls-c2-feed",
@@ -10,13 +10,20 @@
     {
       "path": "/usr/local/sbin/xtls-spamhaus-output",
       "sha256": [
-        "c7093bfbb75bb31d0654b44694a2470917063939d32581e6082251e70a57d18f"
+        "c7093bfbb75bb31d0654b44694a2470917063939d32581e6082251e70a57d18f",
+        "5adc3759693949320b108e8e98ae59029aed810e826554589271dd59e9b1521d"
       ]
     },
     {
       "path": "/usr/local/sbin/xtls-auto-abuse-guard",
       "sha256": [
         "f9eb32909626917a708a66907df0debf7cfc1943e626e7974e03e697996bcd03"
+      ]
+    },
+    {
+      "path": "/usr/local/sbin/xtls-spamhaus-udp",
+      "sha256": [
+        "3a9a538570385684e01514cb38f48937870780dae7f593983b3f6b6b55479f5a"
       ]
     }
   ]
