@@ -4,6 +4,7 @@ import argparse
 import datetime as dt
 import fcntl
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,13 @@ FLOW_TTL_SEC = 600
 MAX_FLOW_KEYS = 4096
 EVENT_RE = re.compile(r"\bSRC=(\S+).*?\bDST=(\S+).*?\bPROTO=(TCP|UDP)\b.*?\bSPT=(\d+)\b.*?\bDPT=(\d+)\b")
 ACCESS_RE = re.compile(r"^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d)\.\d+ .*? accepted (tcp|udp):(\S+) \[([^]]+)\] email: (\S+)")
+
+def canonical_address(value):
+    """Normalize numeric addresses locally; never resolve access-log domains."""
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        return value
 
 def read_recent_access():
     if not ACCESS.is_file():
@@ -107,7 +115,8 @@ def scan():
             return
         if len(events) >= MAX_EVENTS:
             print("INFO: journal batch full; next scan resumes from saved cursor (no newest-only skipping)")
-        records = read_recent_access()
+        records = [(t, p, canonical_address(addr), port, user, route)
+                   for t, p, addr, port, user, route in read_recent_access()]
         out = []
         flows_path = STATE / "flows.json"
         try:
@@ -122,6 +131,8 @@ def scan():
         previous = {k: v for k, v in previous.items()
                     if newest - FLOW_TTL_SEC <= v <= newest + 60}
         for ecursor, stamp, dst, proto, port, src, sport in events:
+            dst = canonical_address(dst)
+            src = canonical_address(src)
             # The source port belongs to the server's outbound socket, not VPN client.
             flow = hashlib.sha256(
                 json.dumps([src, sport, dst, port, proto], separators=(",", ":")).encode()

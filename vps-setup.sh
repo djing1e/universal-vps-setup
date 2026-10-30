@@ -9492,20 +9492,34 @@ print(sum(len(e["set"].get("elem",[])) for e in obj["nftables"] if "set" in e))
     diagnostics_enable
   fi
 )
-diagnostics_enable() {
-  prepare
-  # Rate limits are per-rule (not per destination). Log only outbound matches;
-  # no drop, no NFLOG daemon, no payload capture.
-  if ! nft list chain inet "$TABLE" output | grep -q 'xtls-sh-diag-v4'; then
-    nft add rule inet "$TABLE" output ip daddr @v4 limit rate 2/minute burst 5 packets log prefix '"XTLS-SH4 "' level notice comment '"xtls-sh-diag-v4"'
-  fi
-  if ! nft list chain inet "$TABLE" output | grep -q 'xtls-sh-diag-v6'; then
-    nft add rule inet "$TABLE" output ip6 daddr @v6 limit rate 2/minute burst 5 packets log prefix '"XTLS-SH6 "' level notice comment '"xtls-sh-diag-v6"'
-  fi
+diagnostics_enable() (
   install -d -m 700 "$ROOT"
-  echo enabled > "$ROOT/diagnostics-mode"
-  echo "Spamhaus matched-packet logging enabled (2/minute per family, burst 5; no DROP)"
-}
+  exec 9>"$LOCK"
+  flock -x 9
+  prepare
+  local d
+  d=$(mktemp -d /tmp/xtls-spamhaus-diag.XXXXXXXX)
+  trap 'rm -rf "$d"' EXIT
+  # Replace only our exact diagnostic markers, including legacy duplicates.
+  # One nft transaction preserves the old rules if validation/apply fails.
+  nft -j -a list chain inet "$TABLE" output > "$d/rules.json"
+  python3 - "$d/rules.json" > "$d/batch" <<'PY'
+import json,sys
+markers={'xtls-sh-diag-v4','xtls-sh-diag-v6'}
+for item in json.load(open(sys.argv[1]))['nftables']:
+    rule=item.get('rule',{})
+    if rule.get('comment') in markers:
+        handle=rule['handle']
+        if type(handle) is not int or handle < 0: raise ValueError('invalid rule handle')
+        print(f'delete rule inet xtls_spamhaus_out output handle {handle}')
+for version,family in [(4,'ip'),(6,'ip6')]:
+    print(f'add rule inet xtls_spamhaus_out output ct direction original {family} daddr @v{version} limit rate 2/minute burst 5 packets log prefix "XTLS-SH{version} " level notice comment "xtls-sh-diag-v{version}"')
+PY
+  nft -c -f "$d/batch"
+  nft -f "$d/batch"
+  printf '%s\n' enabled > "$ROOT/diagnostics-mode"
+  echo "Spamhaus original-direction logging enabled (2/minute per family, burst 5; no DROP)"
+)
 diagnostics_disable() {
   local handle
   for marker in xtls-sh-diag-v4 xtls-sh-diag-v6; do
@@ -9665,7 +9679,7 @@ setup_auto_abuse_guard() {
     local choice installer
     installer=$(mktemp /tmp/xtls-auto-guard.XXXXXX.sh) || return 1
     chmod 700 "$installer"
-    if ! curl -fsSL --connect-timeout 10 --max-time 40 "https://raw.githubusercontent.com/djing1e/universal-vps-setup/feature/auto-abuse-guard-observe-20261029/modules/xtls-auto-abuse-guard-install.sh" -o "$installer"; then
+    if ! curl -fsSL --connect-timeout 10 --max-time 40 "https://raw.githubusercontent.com/djing1e/universal-vps-setup/b9d57bc8f252422ac6c51a7a9fc33e7407c18b9d/modules/xtls-auto-abuse-guard-install.sh" -o "$installer"; then
         rm -f "$installer"
         echo "Не удалось загрузить установщик Auto Abuse Guard"
         return 1
