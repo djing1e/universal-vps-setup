@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "target_revision": "db9a8a164216f7f3b39a6e59f290ad2c94682510",
+  "components": {
+    "tcp-c2": {
+      "path": "/usr/local/sbin/xtls-c2-feed",
+      "source": "modules/xtls-c2-feed.sh",
+      "target_sha256": "1c1aa5912fa87a867da6a606c0584b31a250c6362fb1c27105e49291e0076939",
+      "known_previous_sha256": [
+        "b95524e606d3876cee4cd88565705e492c8918fc9b08c1e649b298cf307e1f5e"
+      ],
+      "units": [
+        "xtls-c2-feed-restore.service",
+        "xtls-c2-feed-update.timer"
+      ],
+      "required_probes": [
+        "nft_tables"
+      ]
+    },
+    "spamhaus-output": {
+      "path": "/usr/local/sbin/xtls-spamhaus-output",
+      "source": "modules/xtls-spamhaus-output.sh",
+      "target_sha256": "c7093bfbb75bb31d0654b44694a2470917063939d32581e6082251e70a57d18f",
+      "known_previous_sha256": [
+        "eeb1b4dc7943fa7dc5f411a6fc404f37b4104daedafff4b00d9262361efbb75a",
+        "f69d2bb5c7ebce0905bdcd5d0e55823b1f08f36213c631ae48e88a8963db2777"
+      ],
+      "units": [
+        "xtls-spamhaus-output-restore.service",
+        "xtls-spamhaus-output-update.timer"
+      ],
+      "required_probes": [
+        "nft_tables"
+      ]
+    },
+    "auto-abuse-guard": {
+      "path": "/usr/local/sbin/xtls-auto-abuse-guard",
+      "source": "modules/xtls-auto-abuse-guard.py",
+      "target_sha256": "f9eb32909626917a708a66907df0debf7cfc1943e626e7974e03e697996bcd03",
+      "known_previous_sha256": [
+        "5087d1621ce2709192c67cbf949fc51cf4e98b6b35fa697ee28b05ddcf8ff745"
+      ],
+      "units": [
+        "xtls-auto-abuse-guard.service",
+        "xtls-auto-abuse-guard.timer"
+      ],
+      "required_probes": []
+    }
+  }
+}

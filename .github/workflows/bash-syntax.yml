@@ -37,7 +37,7 @@ jobs:
         shell: bash
         run: |
           bash -n modules/xtls-auto-abuse-guard-install.sh
-          python3 -m py_compile modules/xtls-auto-abuse-guard.py lib/vps_inventory.py
+          python3 -m py_compile modules/xtls-auto-abuse-guard.py lib/vps_inventory.py lib/vps_update_plan.py
           sudo python3 -m unittest discover -s tests -v
       - name: Real nftables conntrack direction and migration
         shell: bash
