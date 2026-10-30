@@ -53,6 +53,47 @@ Path(sys.argv[-1]).write_bytes(b'corrupt' if os.environ.get('CORRUPT_DOWNLOAD') 
     def logged(self):
         return [json.loads(line) for line in self.calls.read_text().splitlines()] if self.calls.exists() else []
 
+    def check_backspace_in_terminal(self,key):
+        import errno
+        import pty
+        import select
+        import time
+        master,slave=pty.openpty()
+        process=subprocess.Popen(['bash','--noprofile','--norc','-c',
+                                  'set -euo pipefail\n'+self.source+'\nsetup_spamhaus_udp_drop'],
+                                 stdin=slave,stdout=slave,stderr=slave,
+                                 env=self.env|{'INPUTRC':'/dev/null','TERM':'xterm'})
+        os.close(slave)
+        try:
+            output=bytearray()
+            deadline=time.monotonic()+5
+            while b' / 0]: ' not in output:
+                self.assertLess(time.monotonic(),deadline,'menu prompt not shown')
+                if select.select([master],[],[],.1)[0]:
+                    output.extend(os.read(master,4096))
+            # Type wrong choice 9, erase it, select status 1, then exit.
+            # Without Readline this becomes an invalid choice for Ctrl-H.
+            os.write(master,b'9'+key+b'1\n0\n')
+            while process.poll() is None and time.monotonic()<deadline:
+                if select.select([master],[],[],.1)[0]:
+                    try:
+                        output.extend(os.read(master,4096))
+                    except OSError as exc:
+                        if exc.errno!=errno.EIO: raise
+                        break
+            self.assertEqual(process.wait(timeout=2),0,output.decode(errors='replace'))
+            self.assertEqual(self.logged(),[['fakepython',str(self.target),'status']])
+        finally:
+            if process.poll() is None:
+                process.kill();process.wait()
+            os.close(master)
+
+    def test_ctrl_h_edits_menu_choice_in_real_pty(self):
+        self.check_backspace_in_terminal(b'\x08')
+
+    def test_del_edits_menu_choice_in_real_pty(self):
+        self.check_backspace_in_terminal(b'\x7f')
+
     def test_open_and_exit_has_no_external_actions(self):
         r=self.run_menu('0\n')
         self.assertEqual(r.returncode,0,r.stderr)

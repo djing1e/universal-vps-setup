@@ -9720,7 +9720,7 @@ spamhaus_udp_exemptions() (
     }
     echo 'IP/CIDR через пробел или запятую; NONE — явно без исключений.'
     echo 'Укажите необходимые адреса панели, входных нод и других сервисов.'
-    read -r -p 'Исключения: ' entries || return 1
+    read -e -r -p 'Исключения: ' entries || return 1
     [[ -n "$entries" ]] || { echo 'Отменено'; return 0; }
     work=$(mktemp /tmp/xtls-spamhaus-udp-exempt.XXXXXX) || return 1
     trap 'rm -f "$work"' EXIT
@@ -9763,7 +9763,7 @@ spamhaus_udp_enable() {
     [[ "$mode" == observe ]] || { echo 'Неизвестный режим; требуется ручная проверка'; return 1; }
     [[ -f /etc/xtls-spamhaus-udp/exemptions.txt ]] || { echo 'Сначала задайте исключения через пункт 4'; return 1; }
     echo 'UDP к сетям Spamhaus будет заблокирован. Через 5 минут сработает автоотключение.'
-    read -r -p 'Введите ENABLE-SPAMHAUS-UDP-DROP: ' answer || return 1
+    read -e -r -p 'Введите ENABLE-SPAMHAUS-UDP-DROP: ' answer || return 1
     [[ "$answer" == ENABLE-SPAMHAUS-UDP-DROP ]] || { echo 'Отменено'; return 0; }
     systemd-run --collect --unit=xtls-sh-udp-safety --on-active=5m --timer-property=AccuracySec=1s --timer-property=RemainAfterElapse=no \
         /usr/bin/python3 /usr/local/sbin/xtls-spamhaus-udp disable-block || return 1
@@ -9779,7 +9779,7 @@ spamhaus_udp_keep() {
     [[ "$(cat /etc/xtls-spamhaus-udp/mode 2>/dev/null || true)" == block ]] || {
         echo 'Block не сохранён: возможно, автоотключение уже сработало. DROP не включается.'; return 1;
     }
-    read -r -p 'Если SSH/VPN/UDP работают, введите KEEP-UDP-DROP: ' answer || return 1
+    read -e -r -p 'Если SSH/VPN/UDP работают, введите KEEP-UDP-DROP: ' answer || return 1
     [[ "$answer" == KEEP-UDP-DROP ]] || { echo 'Защитный таймер оставлен'; return 0; }
     if systemctl is-active --quiet xtls-sh-udp-safety.timer; then
         systemctl stop xtls-sh-udp-safety.timer || return 1
@@ -9798,7 +9798,7 @@ setup_spamhaus_udp_drop() {
         echo '6) Доступ проверен: оставить DROP включённым'
         echo '9) Установка / проверка расширения'
         echo '0) Назад'
-        read -r -p 'Выбор [1-4, 6, 9 / 0]: ' choice || return 0
+        read -e -r -p 'Выбор [1-4, 6, 9 / 0]: ' choice || return 0
         case "$choice" in
             1) if spamhaus_udp_require_installed; then /usr/bin/python3 /usr/local/sbin/xtls-spamhaus-udp status || echo 'Не удалось прочитать UDP-статус'; fi ;;
             2) spamhaus_udp_enable || echo 'Проверьте статус и защитный таймер' ;;
