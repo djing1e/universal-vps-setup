@@ -9488,7 +9488,146 @@ print(sum(len(e["set"].get("elem",[])) for e in obj["nftables"] if "set" in e))
       return 1
     }
   done
+  if [[ "$(cat "$ROOT/diagnostics-mode" 2>/dev/null || true)" == enabled ]]; then
+    diagnostics_enable
+  fi
 )
+diagnostics_enable() (
+  install -d -m 700 "$ROOT"
+  exec 9>"$LOCK"
+  flock -x 9
+  prepare
+  local d
+  d=$(mktemp -d /tmp/xtls-spamhaus-diag.XXXXXXXX)
+  trap 'rm -rf "$d"' EXIT
+  # Replace only our exact diagnostic markers, including legacy duplicates.
+  # One nft transaction preserves the old rules if validation/apply fails.
+  nft -j -a list chain inet "$TABLE" output > "$d/rules.json"
+  python3 - "$d/rules.json" > "$d/batch" <<'PY'
+import json,sys
+markers={'xtls-sh-diag-v4','xtls-sh-diag-v6'}
+for item in json.load(open(sys.argv[1]))['nftables']:
+    rule=item.get('rule',{})
+    if rule.get('comment') in markers:
+        handle=rule['handle']
+        if type(handle) is not int or handle < 0: raise ValueError('invalid rule handle')
+        print(f'delete rule inet xtls_spamhaus_out output handle {handle}')
+for version,family in [(4,'ip'),(6,'ip6')]:
+    print(f'add rule inet xtls_spamhaus_out output ct direction original {family} daddr @v{version} limit rate 2/minute burst 5 packets log prefix "XTLS-SH{version} " level notice comment "xtls-sh-diag-v{version}"')
+PY
+  nft -c -f "$d/batch"
+  nft -f "$d/batch"
+  printf '%s\n' enabled > "$ROOT/diagnostics-mode"
+  echo "Spamhaus original-direction logging enabled (2/minute per family, burst 5; no DROP)"
+)
+diagnostics_disable() {
+  local handle
+  for marker in xtls-sh-diag-v4 xtls-sh-diag-v6; do
+    while :; do
+      handle=$(nft -a list chain inet "$TABLE" output 2>/dev/null |
+        awk -v marker="$marker" 'index($0,marker){for(i=1;i<=NF;i++)if($i=="handle"){print $(i+1);exit}}')
+      [[ -n "$handle" ]] || break
+      nft delete rule inet "$TABLE" output handle "$handle"
+    done
+  done
+  install -d -m 700 "$ROOT"
+  echo disabled > "$ROOT/diagnostics-mode"
+  echo "Spamhaus matched-packet logging disabled"
+}
+diagnostics_report() {
+  # Explicitly on-demand. No background worker, network request, or persistent index.
+  # journalctl bounds both time and rows; tail seeks backwards instead of reading all access.log.
+  python3 - "$ROOT" <<'PY'
+import collections, datetime as dt, ipaddress, os, re, subprocess, sys
+from pathlib import Path
+ROOT=Path(sys.argv[1])
+ACCESS=Path('/var/log/remnanode/access.log')
+LIMIT_EVENTS=60
+LIMIT_JOURNAL=3000
+LIMIT_ACCESS=100000
+WINDOW=3.0
+def run(cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=8, check=False).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ''
+def parse_time(t):
+    try:
+        return dt.datetime.fromisoformat(t.replace('Z','+00:00')).timestamp()
+    except ValueError:
+        return None
+# Read at most 3000 recent kernel messages and only retain 60 Spamhaus log records.
+journal=run(['journalctl','-k','--since','2 hours ago','-n',str(LIMIT_JOURNAL),'--no-pager','-o','short-iso'])
+events=[]
+for line in journal.splitlines():
+    if 'XTLS-SH4 ' not in line and 'XTLS-SH6 ' not in line:
+        continue
+    ts=parse_time(line.split(' ',1)[0])
+    dst=re.search(r'\bDST=([^ ]+)',line)
+    proto=re.search(r'\bPROTO=(TCP|UDP)\b',line)
+    port=re.search(r'\bDPT=(\d+)\b',line)
+    if ts is None or not dst or not proto or not port: continue
+    events.append((ts,dst.group(1),proto.group(1).lower(),port.group(1)))
+events=events[-LIMIT_EVENTS:]
+if not events:
+    print('No Spamhaus kernel matches in bounded recent journal sample.')
+    print('Limits: 2h / last 3000 kernel records; no network requests.')
+    raise SystemExit(0)
+ranges={4:[],6:[]}
+for ver in (4,6):
+    file=ROOT/f'cidr{ver}'
+    if file.exists():
+        for line in file.read_text().splitlines():
+            try: ranges[ver].append(ipaddress.ip_network(line.strip()))
+            except ValueError: pass
+# Avoid 60*1800 comparisons by mapping unique destinations once.
+range_cache={}
+def cidr_for(ip):
+    if ip not in range_cache:
+        try:
+            addr=ipaddress.ip_address(ip)
+            range_cache[ip]=next((str(n) for n in ranges[addr.version] if addr in n), '?')
+        except ValueError:
+            range_cache[ip]='?'
+    return range_cache[ip]
+records=[]
+if ACCESS.is_file():
+    content=run(['tail','-n',str(LIMIT_ACCESS),str(ACCESS)])
+    pattern=re.compile(r'^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d)\.\d+ .*? accepted (tcp|udp):([^ ]+) \[([^]]+)\] email: (\S+)')
+    for line in content.splitlines():
+        m=pattern.search(line)
+        if not m: continue
+        moment=dt.datetime.strptime(m.group(1),'%Y/%m/%d %H:%M:%S').replace(tzinfo=dt.timezone.utc).timestamp()
+        target=m.group(3).rsplit(':',1)
+        if len(target)!=2: continue
+        records.append((moment,target[0].strip('[]'),m.group(2),target[1],m.group(4),m.group(5)))
+print(f'Spamhaus OUTPUT correlations: {len(events)} sampled packets (not unique connections)')
+print(f'Limits: last {LIMIT_JOURNAL} kernel entries, last {LIMIT_ACCESS} access.log lines, ±{WINDOW:g}s UTC')
+if not ACCESS.is_file(): print('WARN: Remnanode access.log is missing')
+unique={}
+for t,ip,proto,port in events:
+    key=(ip,proto,port)
+    if key not in unique: unique[key]=[t,0]
+    unique[key][1]+=1
+for (ip,proto,port),(t,count) in list(unique.items())[-25:]:
+    moment=dt.datetime.fromtimestamp(t,dt.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+    candidates={(r[4],r[5]) for r in records if abs(r[0]-t)<=WINDOW and r[1]==ip and r[2]==proto and r[3]==port}
+    print(f'\n{moment}  {proto.upper()} {ip}:{port}  packets_sampled={count}  range={cidr_for(ip)}')
+    if len(candidates)==1:
+        user,route=next(iter(candidates))
+        print(f'  Remnanode candidate: email={user} route={route} (time/destination match; not proof)')
+    elif candidates:
+        print('  Ambiguous Remnanode candidates: '+', '.join(f'{u} [{r}]' for u,r in sorted(candidates)[:8]))
+    else: print('  Remnanode: no match in bounded access.log sample')
+print('No blocking performed. No process/user attribution without an unambiguous corroborating record.')
+PY
+}
+diagnostics_show() {
+  echo "Recent Spamhaus OUTPUT log events (kernel journal):"
+  journalctl -k --since "2 hours ago" --no-pager -o short-iso 2>/dev/null |
+    grep -E 'XTLS-SH[46] ' | tail -n 60 || true
+  echo "Note: capped logging samples packets, not complete connection counts."
+}
 status() {
   nft list table inet "$TABLE" 2>/dev/null || echo "Not installed"
   echo "Last successful update: $(cat "$ROOT/last-success" 2>/dev/null || echo none)"
@@ -9498,7 +9637,11 @@ case "${1:-}" in
   update) update ;;
   restore) restore ;;
   status) status ;;
-  *) echo "Usage: xtls-spamhaus-output {install|update|restore|status}" >&2;exit 2 ;;
+  diagnostics-enable) diagnostics_enable ;;
+  diagnostics-disable) diagnostics_disable ;;
+  diagnostics-show) diagnostics_show ;;
+  diagnostics-report) diagnostics_report ;;
+  *) echo "Usage: xtls-spamhaus-output {install|update|restore|status|diagnostics-enable|diagnostics-disable|diagnostics-show|diagnostics-report}" >&2;exit 2 ;;
 esac
 XTLS_SPAMHAUS_OUTPUT_MODULE_END
 }
@@ -9511,17 +9654,112 @@ setup_spamhaus_out_observe() {
     echo "1) Установить Spamhaus OUTPUT Observe (без DROP)"
     echo "2) Обновить фид сейчас"
     echo "3) Статус и счётчики"
+    echo "4) Включить ограниченное журналирование совпадений"
+    echo "5) Отключить журналирование"
+    echo "6) Последние события (2 часа)"
+    echo "7) Отчёт: Spamhaus + Remnanode (по запросу)"
     echo "0) Назад"
     read -e -r -p "Выбор: " choice || { rm -f "$f"; return 0; }
     case "$choice" in
         1) bash "$f" install || rc=$? ;;
         2) if [[ -x /usr/local/sbin/xtls-spamhaus-output ]]; then /usr/local/sbin/xtls-spamhaus-output update || rc=$?; else echo "Сначала установите"; rc=1; fi ;;
         3) if [[ -x /usr/local/sbin/xtls-spamhaus-output ]]; then /usr/local/sbin/xtls-spamhaus-output status || rc=$?; else echo "Не установлен"; fi ;;
+        4) bash "$f" diagnostics-enable || rc=$? ;;
+        5) bash "$f" diagnostics-disable || rc=$? ;;
+        6) bash "$f" diagnostics-show || rc=$? ;;
+        7) bash "$f" diagnostics-report || rc=$? ;;
         0) ;;
         *) echo "Неверный выбор" ;;
     esac
     rm -f "$f"
     return "$rc"
+}
+
+setup_auto_abuse_guard() {
+    local choice installer
+    installer=$(mktemp /tmp/xtls-auto-guard.XXXXXX.sh) || return 1
+    chmod 700 "$installer"
+    if ! curl -fsSL --connect-timeout 10 --max-time 40 "https://raw.githubusercontent.com/djing1e/universal-vps-setup/b9d57bc8f252422ac6c51a7a9fc33e7407c18b9d/modules/xtls-auto-abuse-guard-install.sh" -o "$installer"; then
+        rm -f "$installer"
+        echo "Не удалось загрузить установщик Auto Abuse Guard"
+        return 1
+    fi
+    if ! bash -n "$installer"; then rm -f "$installer"; return 1; fi
+    while true; do
+        echo "=== Auto Abuse Guard (только Observe, без блокировок) ==="
+        echo "1) Установить / включить таймер"
+        echo "2) Статус / последние наблюдения"
+        echo "3) Выполнить сканирование сейчас"
+        echo "4) Отключить и удалить сервис (логи сохранить)"
+        echo "0) Назад"
+        read -e -r -p "Выбор: " choice || break
+        case "$choice" in
+            1) bash "$installer" install ;;
+            2) bash "$installer" status ;;
+            3) if [[ -x /usr/local/sbin/xtls-auto-abuse-guard ]]; then /usr/bin/python3 /usr/local/sbin/xtls-auto-abuse-guard scan; else echo "Сначала установите модуль"; fi ;;
+            4) bash "$installer" remove ;;
+            0) break ;;
+            *) echo "Неверный выбор" ;;
+        esac
+    done
+    rm -f "$installer"
+}
+
+setup_smtp25_guard() {
+    local choice f
+    f=$(mktemp /tmp/xtls-smtp25.XXXXXX.sh) || return 1
+    chmod 700 "$f"
+    if ! curl -fsSL --connect-timeout 10 --max-time 40 "https://raw.githubusercontent.com/djing1e/universal-vps-setup/feature/auto-abuse-guard-observe-20261029/modules/xtls-smtp25-guard.sh" -o "$f"; then
+        rm -f "$f"; echo "Ошибка загрузки SMTP25 Guard"; return 1
+    fi
+    if ! bash -n "$f"; then rm -f "$f"; return 1; fi
+    while true; do
+        echo "=== SMTP25 Anti-Abuse (исходящий TCP/25) ==="
+        echo "1) Установить (Observe по умолчанию)"
+        echo "2) Статус и счётчики"
+        echo "3) Observe (без блокировок)"
+        echo "4) Блокировать только исходящий TCP/25 (явное подтверждение)"
+        echo "5) Отключить защиту"
+        echo "0) Назад"
+        read -e -r -p "Выбор: " choice || break
+        case "$choice" in
+            1) bash "$f" install ;;
+            2) if [[ -x /usr/local/sbin/xtls-smtp25-guard ]]; then /usr/local/sbin/xtls-smtp25-guard status; else echo "Не установлен"; fi ;;
+            3) if [[ -x /usr/local/sbin/xtls-smtp25-guard ]]; then /usr/local/sbin/xtls-smtp25-guard observe; else echo "Сначала установите"; fi ;;
+            4) read -e -r -p "Введите BLOCK-SMTP25 для подтверждения: " confirm
+               if [[ "$confirm" == "BLOCK-SMTP25" ]]; then /usr/local/sbin/xtls-smtp25-guard block; else echo "Отменено"; fi ;;
+            5) if [[ -x /usr/local/sbin/xtls-smtp25-guard ]]; then /usr/local/sbin/xtls-smtp25-guard disable; else echo "Не установлен"; fi ;;
+            0) break ;;
+            *) echo "Неверный выбор" ;;
+        esac
+    done
+    rm -f "$f"
+}
+
+setup_portscan_observe() {
+    local choice f
+    f=$(mktemp /tmp/xtls-portscan.XXXXXX.sh) || return 1
+    chmod 700 "$f"
+    if ! curl -fsSL --connect-timeout 10 --max-time 40 "https://raw.githubusercontent.com/djing1e/universal-vps-setup/feature/auto-abuse-guard-observe-20261029/modules/xtls-portscan-observe.sh" -o "$f"; then
+        rm -f "$f"; echo "Ошибка загрузки Port Scan Observe"; return 1
+    fi
+    if ! bash -n "$f"; then rm -f "$f"; return 1; fi
+    while true; do
+        echo "=== Port Scan Guard — Observe (без блокировок) ==="
+        echo "1) Установить / включить Observe"
+        echo "2) Статус / счётчики"
+        echo "3) Отключить Observe"
+        echo "0) Назад"
+        read -e -r -p "Выбор: " choice || break
+        case "$choice" in
+            1) bash "$f" install ;;
+            2) if [[ -x /usr/local/sbin/xtls-portscan-observe ]]; then /usr/local/sbin/xtls-portscan-observe status; else echo "Не установлен"; fi ;;
+            3) if [[ -x /usr/local/sbin/xtls-portscan-observe ]]; then /usr/local/sbin/xtls-portscan-observe disable; else echo "Не установлен"; fi ;;
+            0) break ;;
+            *) echo "Неверный выбор" ;;
+        esac
+    done
+    rm -f "$f"
 }
 
 setup_antiabuse_center() {
@@ -9534,14 +9772,20 @@ setup_antiabuse_center() {
         echo "  3) UDP Anti-Abuse (OUTPUT)"
         echo "  4) Общий статус (только чтение)"
         echo "  5) Spamhaus OUTPUT Observe (без DROP)"
+        echo "  6) Auto Abuse Guard (Observe)"
+        echo "  7) SMTP25 Guard (опциональная исходящая защита)"
+        echo "  8) Port Scan Guard (Observe)"
         echo "  0) Назад"
-        read -e -r -p "Выберите [0-5]: " choice || return 0
+        read -e -r -p "Выберите [0-8]: " choice || return 0
         case "$choice" in
             1) setup_threat_blocklist ;;
             2) setup_c2_feed ;;
             3) setup_udp_abuse ;;
             4) antiabuse_center_status ;;
             5) setup_spamhaus_out_observe ;;
+            6) setup_auto_abuse_guard ;;
+            7) setup_smtp25_guard ;;
+            8) setup_portscan_observe ;;
             0) return 0 ;;
             *) echo "Неверный выбор" ;;
         esac
