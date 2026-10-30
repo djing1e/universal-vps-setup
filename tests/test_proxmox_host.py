@@ -22,7 +22,7 @@ from test_pve_compiled import fixture as compiled_fixture
 ADMINS = ['8.8.8.8/32', '2606:4700:4700::1111/128']
 
 
-def compiler_result(argv):
+def compiler_result(argv, **kwargs):
     if argv[0] != 'perl':
         return ''
     from pve_compiled import expected_rules
@@ -30,7 +30,7 @@ def compiler_result(argv):
     for family in (4, 6):
         snapshot['ipv'+str(family)]['PVEFW-HOST-IN'] = [
             f'-A PVEFW-HOST-IN -s {source} -p tcp --dport {port} -j RETURN'
-            for f, source, _, port in expected_rules(Path(argv[-1]).read_text()) if f == family]
+            for f, source, _, port in expected_rules(Path(argv[-2]).read_text()) if f == family]
     return json.dumps(snapshot)
 
 
@@ -156,7 +156,7 @@ class ProxmoxTests(unittest.TestCase):
 
     def test_preflight_diagnostics_never_arm_timer_or_write_host(self):
         commands = []
-        def run(argv):
+        def run(argv, **kwargs):
             commands.append(argv)
             return 'config parser: unknown option' if argv[0] == 'perl' else ''
         with patch.object(host, 'run', side_effect=run):
@@ -215,7 +215,7 @@ class ProxmoxTests(unittest.TestCase):
 
     def test_timer_before_activation_and_rollback_preserves_guests(self):
         before = self.snapshot(); commands = []
-        def run(argv):
+        def run(argv, **kwargs):
             commands.append(argv)
             return compiler_result(argv)
         with patch.object(host, 'run', side_effect=run):
@@ -233,7 +233,7 @@ class ProxmoxTests(unittest.TestCase):
         self.assertFalse(any(a[0] in ('nft', 'iptables', 'ip', 'qm', 'pct') for a in commands))
 
     def test_timer_failure_never_writes_host_config(self):
-        def run(argv):
+        def run(argv, **kwargs):
             if argv[0] == 'systemd-run': raise RuntimeError('timer failure')
             return compiler_result(argv)
         with patch.object(host, 'run', side_effect=run):
@@ -242,7 +242,7 @@ class ProxmoxTests(unittest.TestCase):
         self.assertTrue(list((self.root/'var/lib/proxmox-host').glob('*/rolled-back')))
 
     def test_failed_compile_rolls_back_before_commit(self):
-        def run(argv):
+        def run(argv, **kwargs):
             if argv == ['pve-firewall', 'compile']:
                 # Fail only the initial post-write check; permit rollback check.
                 if not getattr(run, 'failed', False):
@@ -266,7 +266,7 @@ class ProxmoxTests(unittest.TestCase):
 
     def test_ssh_failure_restores_backup_without_changing_bridges(self):
         before = self.snapshot(); commands=[]
-        def run(argv):
+        def run(argv, **kwargs):
             commands.append(argv)
             if argv == ['sshd', '-T']:
                 return 'pubkeyauthentication yes\npasswordauthentication yes\n'
@@ -332,7 +332,7 @@ class ProxmoxTests(unittest.TestCase):
             self.assertNotIn('MUTATED', result.stdout)
 
     def test_independent_process_can_rollback_during_restart(self):
-        def run(argv):
+        def run(argv, **kwargs):
             if argv == ['systemctl', 'restart', 'pve-firewall.service']:
                 txn = next((self.root/'var/lib/proxmox-host').iterdir())
                 # A real second process takes the real flock and restores files.
@@ -346,7 +346,7 @@ class ProxmoxTests(unittest.TestCase):
         self.assertFalse((self.root/'etc/pve/nodes/testnode/host.fw').exists())
 
     def test_expiry_during_service_checks_rejects_apply(self):
-        def run(argv):
+        def run(argv, **kwargs):
             if argv == ['systemctl', 'restart', 'pve-firewall.service']:
                 txn = next((self.root/'var/lib/proxmox-host').iterdir())
                 state = json.loads((txn/'state.json').read_text())

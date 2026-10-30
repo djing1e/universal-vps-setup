@@ -195,3 +195,44 @@ OK
 Тесты на production остановлены. Никаких подключений/команд на hilocaladmin
 не выполнялось; дальнейшая разработка — по сохранённым артефактам и на отдельном
 стенде. PR остаётся draft, production rollout запрещён.
+
+## Разделение Datacenter-входов для проверки
+
+Добавлены два несмешиваемых CLI-режима:
+
+- `validate-candidate`: действующий Datacenter, без аргумента override;
+  disabled/absent policy и missing Host chains означают отказ.
+- `validate-offline --datacenter TEST`: явно указанный enabled тестовый файл
+  вне `/etc/pve`, передаётся в PVE loader исключительно для этого compile.
+  Нет копирования/записи в live config и нет activation/reload/restart.
+
+Offline report сохраняет compiled JSON, provenance, хеши файлов и запрещающие
+флаги. Изменение входных файлов во время compile отвергается. Operation Apply
+явно отклоняет validation results; CLI не допускает test Datacenter override
+в production/Apply. Повторный artifact analysis сохраняет offline происхождение
+и не разрешает Apply.
+
+Новые tests проверяют выбор live/test loader inputs, disabled live + enabled test,
+отсутствующие цепочки, обязательность external test-файла, изменение входа,
+CLI isolation, непригодность offline result для Apply и повторный offline analysis.
+В двух тестах исполняется **настоящий Perl**, но PVE::Cluster/PVE::Firewall —
+синтетические stub packages; проверяются Perl exporter и маршрутизация аргументов,
+**не установленная реализация PVE 6.0.6**. Действующий fixture config остаётся
+неизменённым, disabled production не достигает compile.
+
+Реальный положительный JSON-export с enabled test Datacenter: **NOT RUN**.
+Отсутствие live compiled IPv4 Host chain не обходится в production; именно для
+этого отдельный offline режим существует. PR Draft и общий запрет Apply сохранены.
+
+Проверки этой итерации: **157/157 OK** от root в одноразовом Debian 13
+контейнере (Python 3, systemd для unit validation, Perl/JSON::PP), без пропусков.
+В том числе 9 новых mode-isolation тестов. Вне контейнера профильные тесты:
+51/51 OK. Bash syntax, Python compilation, `git diff --check` прошли.
+
+```text
+Ran 157 tests in 11.296s
+
+OK
+```
+
+Эти результаты не изменяют NOT RUN для реального положительного PVE exporter.

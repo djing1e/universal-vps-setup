@@ -273,3 +273,68 @@ exceptions PVE**, независимо от запроса SPICE в кандид
 Production-проверки на `hilocaladmin` остановлены. Для следующего этапа нужны
 сохранённые артефакты и/или отдельный disposable PVE-стенд, не новые испытания
 на рабочем сервере.
+
+## Production preflight и offline validation — разные режимы
+
+**Production preflight**:
+
+```sh
+python3 lib/proxmox_host.py validate-candidate candidate.fw > production-report.json
+```
+
+Загружает Datacenter только через `load_clusterfw_conf()` без filename override.
+Если действующая Datacenter firewall policy выключена/отсутствует — отказ до
+compile. Если после compile отсутствуют IPv4/IPv6 Host-цепочки — отказ.
+Этот режим не принимает `--datacenter`; Apply также не имеет такого аргумента.
+Даже положительная семантическая сверка не открывает заблокированный Apply и
+не подтверждает реальную доступность. Проверка состояния daemon и live правил
+по-прежнему входит в отдельные условия production-процедуры.
+
+**Offline validation** на отдельном PVE с установленными библиотеками:
+
+```sh
+lab_dir=$(mktemp -d /tmp/pve-validation.XXXXXX)
+cat > "$lab_dir/cluster.fw" <<'EOF'
+[OPTIONS]
+enable: 1
+policy_in: DROP
+policy_out: ACCEPT
+EOF
+# candidate.fw — кандидат исправленного генератора с вашими тестовыми admin CIDR.
+python3 lib/proxmox_host.py validate-offline candidate.fw \
+  --datacenter "$lab_dir/cluster.fw" > "$lab_dir/offline-report.json"
+python3 lib/proxmox_host.py analyze-compiled candidate.fw "$lab_dir/offline-report.json"
+```
+
+Файл Datacenter передаётся **только** в
+`load_clusterfw_conf($test_filename)` этого процесса. Его не копируют в
+`/etc/pve/firewall/cluster.fw`, не подключают bind mount, не изменяют enable
+действующей политики и не вызывают save/reload/restart/apply. Test-файл должен
+быть явно передан, быть обычным файлом вне `/etc/pve` и содержать `enable: 1`.
+Отсутствующий или выключенный test-файл не вызывает fallback к live конфигурации.
+PVE compiler может читать прочую локальную топологию/SDN/VM/corosync: это режим
+подмены только Datacenter-входа, не полностью автономный эмулятор всего PVE.
+
+Оба режима выполняют одинаковую проверку JSON, Host grammar, expected rules,
+management ipsets и переходов цепочек. Экспорт compiler ограничен 512 KiB / 30 s;
+превышение — отказ, не частичное подтверждение. Вход offline artifact analysis
+ограничен 4 MiB. В отчёте сохранён raw `compiled_snapshot` для воспроизведения.
+
+Offline report и snapshot явно содержат provenance:
+
+- `validation_mode: offline`, `datacenter_source: explicit_test_file`;
+- SHA-256 кандидата и тестовой Datacenter-конфигурации;
+- `production_safety_evidence: false`, `apply_authorized: false`;
+- `activation_allowed: false`, `management_access_verified: false` в анализе.
+
+`analyze-compiled` принимает как snapshot, так и полный report, сохраняет source
+provenance и выдаёт только `offline_artifact_analysis`. Повторный анализ не
+превращает тестовые данные в production evidence. Apply принимает только
+свежий operation Plan, а не validation report/snapshot. Тестовый allowlist и
+management set ничего не доказывают о действующих Datacenter rules/exceptions.
+
+**Текущий статус реального PVE:** отрицательные проверки сообщены как PASS,
+положительный тест ранее остановился из-за отсутствия compiled IPv4 Host chain.
+Реальный JSON-export с включённой **тестовой** Datacenter-конфигурацией в этой
+задаче ещё не проверен. Подставные PVE-модули в тестах не заменяют этот результат.
+Production на hilocaladmin не используется; PR остаётся Draft, Apply закрыт.

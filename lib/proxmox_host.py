@@ -28,13 +28,13 @@ MAX_FILE = 65536
 CONFIRM = 'APPLY PROXMOX HOST'
 
 
-def read_file(path):
+def read_file(path, max_bytes=MAX_FILE):
     try:
         if path.is_symlink() or not stat.S_ISREG(path.stat().st_mode):
             raise ValueError('not a regular file: '+str(path))
         with path.open('rb') as stream:
-            data = stream.read(MAX_FILE + 1)
-        if len(data) > MAX_FILE:
+            data = stream.read(max_bytes + 1)
+        if len(data) > max_bytes:
             raise ValueError('oversized file: '+str(path))
         return data
     except FileNotFoundError:
@@ -275,15 +275,36 @@ def make_plan(report, operation, admins=(), spice=False, dynamic_admin=False):
     return plan
 
 
-def run(argv):
-    result = probe(argv, timeout=30)
+def run(argv, *, limit=32768):
+    result = probe(argv, timeout=30, limit=limit)
     if result['status'] != 'ok':
         raise RuntimeError('command failed: '+ ' '.join(argv)+': '+result.get('output', '')[:1000])
     return result.get('output', '')
 
 
 def validate_candidate(path):
-    """Read-only preflight. All output from the quiet PVE parser is a failure."""
+    """Production preflight always reads live Datacenter configuration."""
+    return compile_candidate(path, mode='production')
+
+
+def validate_offline(path, datacenter):
+    """Explicit test-only Datacenter input, never production evidence."""
+    if datacenter is None:
+        raise ValueError('offline validation requires an explicit test Datacenter file')
+    if datacenter.resolve().is_relative_to(Path('/etc/pve')):
+        raise ValueError('offline Datacenter file must be outside active /etc/pve')
+    raw = read_file(datacenter)
+    if raw is None:
+        raise ValueError('test Datacenter file missing')
+    policy = datacenter_policy({'status': 'observed', 'content': raw.decode('utf-8')})
+    if policy['parse_errors'] or policy['options'].get('enable') != '1':
+        raise ValueError('test Datacenter configuration must be valid and explicitly enabled')
+    return compile_candidate(path, mode='offline', datacenter=datacenter)
+
+
+def compile_candidate(path, *, mode, datacenter=None):
+    if mode not in ('production', 'offline') or (mode == 'production' and datacenter is not None) or (mode == 'offline' and datacenter is None):
+        raise ValueError('production cannot use test Datacenter configuration')
     raw = read_file(path)
     if raw is None:
         raise ValueError('candidate missing')
@@ -300,22 +321,39 @@ def validate_candidate(path):
     except ImportError:
         from pve_compiled import expected_rules
     expected = expected_rules(text)
+    datacenter_before = read_file(datacenter) if datacenter is not None else None
     output = run(['perl', '-e',
         'BEGIN { $SIG{__WARN__}=sub { die @_ }; } '
         'use JSON::PP; use PVE::Cluster; use PVE::Firewall; PVE::Cluster::cfs_update(); '
         '$SIG{__WARN__}=sub { die @_ }; '
-        'my $c=PVE::Firewall::load_clusterfw_conf(); '
+        'my $c=length($ARGV[1]) ? PVE::Firewall::load_clusterfw_conf($ARGV[1]) '
+        ': PVE::Firewall::load_clusterfw_conf(); '
+        'die "Datacenter firewall disabled or absent\n" unless $c->{options}->{enable}; '
         'my $h=PVE::Firewall::load_hostfw_conf($c,$ARGV[0]); '
         'my ($v4,$sets,$v6,$eb)=PVE::Firewall::compile($c,$h); '
         'print JSON::PP->new->canonical->encode({schema_version=>1, '
-        'ipv4=>$v4->{filter},ipv6=>$v6->{filter},ipsets=>$sets});', str(path)])
+        'ipv4=>$v4->{filter},ipv6=>$v6->{filter},ipsets=>$sets});',
+        '--', str(path), str(datacenter) if datacenter is not None else ''], limit=512*1024)
     # Diagnostics before/after JSON, including swallowed parser warnings with
     # exit 0, are rejected. A quiet exit without an exported ruleset also fails.
     try:
         snapshot = json.loads(output)
     except (ValueError, TypeError) as error:
         raise ValueError('PVE compiler diagnostics or missing JSON ruleset') from error
-    return validate_compiled(snapshot, expected)
+    if read_file(path) != raw or (datacenter is not None and read_file(datacenter) != datacenter_before):
+        raise ValueError('candidate or test Datacenter file changed during compilation')
+    if not isinstance(snapshot, dict):
+        raise ValueError('compiled snapshot must be a JSON object')
+    provenance = {'validation_mode': mode,
+                  'datacenter_source': 'live' if mode == 'production' else 'explicit_test_file',
+                  'candidate_sha256': fingerprint(raw),
+                  'test_datacenter_sha256': fingerprint(datacenter_before),
+                  'production_safety_evidence': False, 'apply_authorized': False}
+    snapshot['provenance'] = provenance
+    result = validate_compiled(snapshot, expected)
+    result.update(provenance)
+    result['compiled_snapshot'] = snapshot
+    return result
 
 
 def validate_compiled(snapshot, expected):
@@ -403,6 +441,8 @@ def rollback(transaction):
 
 def apply(plan, args, root=Path('/'), runner=probe):
     # Root/runner arguments exist for fixture integration tests, not CLI overrides.
+    if plan.get('mode') != 'plan' or plan.get('profile') != 'proxmox':
+        raise ValueError('only reviewed operation plans are accepted; validation results cannot authorize Apply')
     if args.confirm != CONFIRM or not all((args.console_confirmed, args.rollback_confirmed,
                                           args.key_login_confirmed)):
         raise ValueError('explicit plan, console/rescue, rollback and working key login confirmations required')
@@ -548,6 +588,9 @@ def main():
     sub.add_parser('audit')
     validation = sub.add_parser('validate-candidate')
     validation.add_argument('candidate', type=Path)
+    test_validation = sub.add_parser('validate-offline')
+    test_validation.add_argument('candidate', type=Path)
+    test_validation.add_argument('--datacenter', type=Path, required=True)
     offline = sub.add_parser('analyze-compiled')
     offline.add_argument('candidate', type=Path)
     offline.add_argument('snapshot', type=Path)
@@ -574,14 +617,21 @@ def main():
         elif args.action == 'validate-candidate':
             output = validate_candidate(args.candidate)
             output.update(status='candidate_rules_verified_access_unverified', changes_applied=False)
+        elif args.action == 'validate-offline':
+            output = validate_offline(args.candidate, args.datacenter)
+            output.update(status='offline_validation_only', changes_applied=False)
         elif args.action == 'analyze-compiled':
             try:
                 from .pve_compiled import expected_rules
             except ImportError:
                 from pve_compiled import expected_rules
-            output = validate_compiled(json.loads(read_file(args.snapshot)),
+            artifact = json.loads(read_file(args.snapshot, max_bytes=4*1024*1024))
+            snapshot = artifact.get('compiled_snapshot', artifact)
+            output = validate_compiled(snapshot,
                                        expected_rules(read_file(args.candidate).decode('utf-8')))
-            output['changes_applied'] = False
+            output.update(changes_applied=False, validation_mode='offline_artifact_analysis',
+                          source_provenance=snapshot.get('provenance'), production_safety_evidence=False,
+                          apply_authorized=False)
         elif args.action == 'plan':
             output = make_plan(audit(), args.operation, args.admin, args.spice, args.dynamic_admin)
         elif args.action == 'apply':
