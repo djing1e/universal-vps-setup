@@ -1,0 +1,12 @@
+{
+  "target_revision": "0d5ccba5e74f762d8345cf7e9c7890bb9af8e79d",
+  "target_sha256": "f9eb32909626917a708a66907df0debf7cfc1943e626e7974e03e697996bcd03",
+  "accepted_current_sha256": [
+    "f9eb32909626917a708a66907df0debf7cfc1943e626e7974e03e697996bcd03",
+    "5087d1621ce2709192c67cbf949fc51cf4e98b6b35fa697ee28b05ddcf8ff745"
+  ],
+  "units": {
+    "xtls-auto-abuse-guard.service": "f89fff2d6b9803d06c57d6d0a153be7f10161445c380576c51f78c6e2e0d724f",
+    "xtls-auto-abuse-guard.timer": "2ca974bd2f4a9b8991c29ecb34d65a9fa88c33350075b25d4d4c43f12f3db7f1"
+  }
+}
