@@ -31,6 +31,8 @@ def _require_vps_host():
     try:
         _pkg = _subprocess.run(['dpkg-query', '-W', '-f=${Status}', 'pve-manager'],
                                capture_output=True, timeout=3, text=True)
+        if _pkg.returncode not in (0, 1):
+            raise SystemExit('Host detection unavailable; refusing node module')
         _pve = _pve or (_pkg.returncode == 0 and _pkg.stdout == 'install ok installed')
     except (OSError, _subprocess.TimeoutExpired):
         raise SystemExit('Host detection unavailable; refusing node module')
