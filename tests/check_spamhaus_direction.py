@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import socket
+import shutil
 import subprocess
 import tempfile
 
@@ -65,3 +66,24 @@ with tempfile.TemporaryDirectory() as directory:
         assert counts[f'xtls-sh-out-v{version}']==original+reply, counts
         print(f'IPv{version}: original={original}, reply={reply}; counters include both, diagnostics original only')
     print('Real nft migration, repeat enable, IPv4/IPv6 conntrack direction: OK')
+    # Exercise both modules in the same namespace, not just independent runs.
+    from test_c2_feed import C2Tests
+    observer_before = nft('-s', 'list', 'table', 'inet', 'xtls_spamhaus_out')
+    fixture = C2Tests()
+    fixture.setUp()
+    try:
+        (fixture.bin/'nft').unlink()
+        (fixture.bin/'nft').symlink_to(shutil.which('nft'))
+        fixture.run_cli('install')
+        fixture.run_cli('enable-block', answer='ENABLE-C2-BLOCK\n')
+        fixture.run_cli('update')
+        fixture.run_cli('disable-block')
+        fixture.run_cli('restore')
+        assert observer_before == nft('-s', 'list', 'table', 'inet', 'xtls_spamhaus_out')
+        c2_before = nft('-s', 'list', 'table', 'ip', 'xtls_c2_feed')
+        enable()
+        assert c2_before == nft('-s', 'list', 'table', 'ip', 'xtls_c2_feed')
+        assert 'xtls-c2-block' not in nft('list','chain','ip','xtls_c2_feed','output')
+        print('Cross-module coexistence: C2 transitions preserve observer; diagnostics preserve C2')
+    finally:
+        fixture.doCleanups()

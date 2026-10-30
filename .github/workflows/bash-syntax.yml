@@ -29,6 +29,7 @@ jobs:
         shell: bash
         run: |
           bash -n vps-setup.sh
+          bash -n modules/xtls-c2-feed.sh
           echo 'Bash syntax OK'
       - name: Auto Abuse Guard syntax and regression tests
         shell: bash
@@ -46,3 +47,5 @@ jobs:
           sudo ip netns add "$ns"
           sudo ip -n "$ns" link set lo up
           sudo ip netns exec "$ns" python3 tests/check_spamhaus_direction.py
+      - name: C2 real nftables regression tests in a network namespace
+        run: sudo python3 tests/check_c2_real_nft.py

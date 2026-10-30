@@ -9029,16 +9029,33 @@ PY
  nft -f "$tmp/batch" || return 1
 }
 remove_rules() {
- local h
- while :; do
-   h=$(nft -a list chain ip "$TABLE" output 2>/dev/null | sed -n '/xtls-c2-block/s/.*# handle \\([0-9][0-9]*\\).*/\\1/p' | head -1) || true
-   [[ -n "$h" ]] || break
-   nft delete rule ip "$TABLE" output handle "$h"
+ local h rules handles tables
+ if ! rules=$(nft -a list chain ip "$TABLE" output 2>/dev/null); then
+   # A never-installed module has nothing to remove. Inspection errors on an
+   # existing table must not be reported as a successful switch to observe.
+   tables=$(nft list tables) || return 1
+   if printf '%s\n' "$tables" | grep -Fxq "table ip $TABLE"; then
+     echo 'ERROR: cannot inspect C2 output chain' >&2
+     return 1
+   fi
+   return 0
+ fi
+ handles=$(printf '%s\n' "$rules" | sed -n '/comment "xtls-c2-block"/s/.*# handle \([0-9][0-9]*\).*/\1/p')
+ for h in $handles; do
+   nft delete rule ip "$TABLE" output handle "$h" || return 1
  done
+ rules=$(nft -a list chain ip "$TABLE" output) || return 1
+ if [[ "$rules" == *'comment "xtls-c2-block"'* ]]; then
+   echo 'ERROR: C2 DROP rule remains; observe mode not applied' >&2
+   return 1
+ fi
 }
+
 restore_locked() {
  local tmp m
- m=$(saved_mode)
+ m=$(saved_mode) || return 1
+ # Enforce observe even when the cached feed is missing or invalid.
+ if [[ "$m" == observe ]]; then remove_rules || return 1; fi
  [[ -s "$CSV" ]] || { echo 'No local C2 cache' >&2; return 1; }
  tmp=$(mktemp -d)
  validate_and_apply "$tmp" "$CSV" || { rm -rf "$tmp"; return 1; }
@@ -9047,8 +9064,6 @@ restore_locked() {
    if [[ "$(mode)" != block ]]; then
      nft add rule ip "$TABLE" output ip daddr . tcp dport @c2_pairs counter drop comment '"xtls-c2-block"'
    fi
- else
-   remove_rules
  fi
  echo "Restored. Mode: $m"
 }
@@ -9056,7 +9071,10 @@ restore() ( lock; restore_locked; )
 update() (
  lock
  install -d -m 700 "$ROOT"
- local tmp
+ local tmp m
+ m=$(saved_mode) || return 1
+ # A refresh must also heal an old Saved=observe / Live=block mismatch.
+ if [[ "$m" == observe ]]; then remove_rules || return 1; fi
  tmp=$(mktemp -d)
  if ! curl -fsSL --retry 2 --connect-timeout 10 --max-time 60 "$URL" -o "$tmp/source"; then
    if ! curl -fsSL --retry 2 --connect-timeout 10 --max-time 60 "$BACKUP" -o "$tmp/source"; then
@@ -9069,7 +9087,7 @@ update() (
  install -m 600 "$tmp/validated" "$ROOT/.validated.new"
  mv -f "$ROOT/.validated.new" "$CSV"
  rm -rf "$tmp"
- if [[ "$(saved_mode)" == block && "$(mode)" != block ]]; then
+ if [[ "$m" == block && "$(mode)" != block ]]; then
    nft add rule ip "$TABLE" output ip daddr . tcp dport @c2_pairs counter drop comment '"xtls-c2-block"'
  fi
  echo "Updated. Mode: $(mode)"
@@ -9136,8 +9154,9 @@ block() {
 }
 unblock() {
  lock
- write_mode observe
- remove_rules
+ # Persist the safe boot intent first, but only report success after removal.
+ write_mode observe || return 1
+ remove_rules || return 1
  echo 'Blocking disabled and persisted'
 }
 
@@ -9709,7 +9728,7 @@ setup_smtp25_guard() {
     local choice f
     f=$(mktemp /tmp/xtls-smtp25.XXXXXX.sh) || return 1
     chmod 700 "$f"
-    if ! curl -fsSL --connect-timeout 10 --max-time 40 "https://raw.githubusercontent.com/djing1e/universal-vps-setup/feature/auto-abuse-guard-observe-20261029/modules/xtls-smtp25-guard.sh" -o "$f"; then
+    if ! curl -fsSL --connect-timeout 10 --max-time 40 "https://raw.githubusercontent.com/djing1e/universal-vps-setup/08d02d30789344b532aa260515c107ed93393b33/modules/xtls-smtp25-guard.sh" -o "$f"; then
         rm -f "$f"; echo "Ошибка загрузки SMTP25 Guard"; return 1
     fi
     if ! bash -n "$f"; then rm -f "$f"; return 1; fi
@@ -9740,7 +9759,7 @@ setup_portscan_observe() {
     local choice f
     f=$(mktemp /tmp/xtls-portscan.XXXXXX.sh) || return 1
     chmod 700 "$f"
-    if ! curl -fsSL --connect-timeout 10 --max-time 40 "https://raw.githubusercontent.com/djing1e/universal-vps-setup/feature/auto-abuse-guard-observe-20261029/modules/xtls-portscan-observe.sh" -o "$f"; then
+    if ! curl -fsSL --connect-timeout 10 --max-time 40 "https://raw.githubusercontent.com/djing1e/universal-vps-setup/08d02d30789344b532aa260515c107ed93393b33/modules/xtls-portscan-observe.sh" -o "$f"; then
         rm -f "$f"; echo "Ошибка загрузки Port Scan Observe"; return 1
     fi
     if ! bash -n "$f"; then rm -f "$f"; return 1; fi
