@@ -36,3 +36,13 @@ jobs:
           bash -n modules/xtls-auto-abuse-guard-install.sh
           python3 -m py_compile modules/xtls-auto-abuse-guard.py
           sudo python3 -m unittest discover -s tests -v
+      - name: Real nftables conntrack direction and migration
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y nftables iproute2
+          ns="guard-diag-${GITHUB_RUN_ID}"
+          trap 'sudo ip netns del "$ns"' EXIT
+          sudo ip netns add "$ns"
+          sudo ip -n "$ns" link set lo up
+          sudo ip netns exec "$ns" python3 tests/check_spamhaus_direction.py
