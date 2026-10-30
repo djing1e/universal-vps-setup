@@ -9665,7 +9665,7 @@ setup_auto_abuse_guard() {
     local choice installer
     installer=$(mktemp /tmp/xtls-auto-guard.XXXXXX.sh) || return 1
     chmod 700 "$installer"
-    if ! curl -fsSL --connect-timeout 10 --max-time 40 "https://raw.githubusercontent.com/djing1e/universal-vps-setup/e57346226c9e8ff23d73f205d10ad00bc90acfd8/modules/xtls-auto-abuse-guard-install.sh" -o "$installer"; then
+    if ! curl -fsSL --connect-timeout 10 --max-time 40 "https://raw.githubusercontent.com/djing1e/universal-vps-setup/b9d57bc8f252422ac6c51a7a9fc33e7407c18b9d/modules/xtls-auto-abuse-guard-install.sh" -o "$installer"; then
         rm -f "$installer"
         echo "Не удалось загрузить установщик Auto Abuse Guard"
         return 1
