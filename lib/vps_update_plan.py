@@ -68,8 +68,16 @@ def validate_catalog(catalog):
             raise ValueError('invalid component path')
         if not isinstance(item.get('units'), list) or not item['units']:
             raise ValueError('missing service prerequisites')
-        if not all(isinstance(v, str) for v in item['units'] + item.get('required_probes', [])):
+        if not isinstance(item.get('required_probes'), list):
+            raise ValueError('invalid required probes')
+        if not all(isinstance(v, str) for v in item['units'] + item['required_probes']):
             raise ValueError('invalid prerequisites')
+        mode = item.get('saved_mode')
+        if mode is not None and (not isinstance(mode, dict) or
+                not isinstance(mode.get('path'), str) or not mode['path'].startswith('/etc/') or
+                not isinstance(mode.get('allowed'), list) or not mode['allowed'] or
+                not all(isinstance(v, str) for v in mode['allowed'])):
+            raise ValueError('invalid saved mode prerequisite')
 
 
 def build_plan(report, selected, catalog):
@@ -94,6 +102,16 @@ def build_plan(report, selected, catalog):
                'target_sha256': item['target_sha256'],
                'status': 'blocked', 'reasons': [], 'automatic_apply': False}
         reasons = row['reasons']
+        mode_spec = item.get('saved_mode')
+        if mode_spec is not None:
+            modes = report.get('saved_modes')
+            mode = modes.get(mode_spec['path']) if isinstance(modes, dict) else None
+            if (not isinstance(mode, dict) or mode.get('status') != 'observed' or
+                    mode.get('scope') != 'saved_only' or mode.get('value') not in mode_spec['allowed']):
+                reasons.append('saved_mode_unknown:'+mode_spec['path'])
+            else:
+                row['preserve_saved_mode'] = {'path': mode_spec['path'], 'value': mode['value']}
+
         if not supported_os:
             reasons.append('unsupported_or_unknown_os')
         for unit in item['units']:
@@ -106,6 +124,8 @@ def build_plan(report, selected, catalog):
                 reasons.append('unit_not_loaded:'+unit)
                 continue
             # Unknown runtime state is not treated as stopped or safe to restart.
+            if not isinstance(properties.get('SubState'), str) or not properties['SubState']:
+                reasons.append('unit_substate_unknown:'+unit)
             if properties.get('ActiveState') not in ('active', 'inactive'):
                 reasons.append('unit_runtime_requires_review:'+unit)
             if properties.get('UnitFileState') not in ('enabled', 'disabled', 'static', 'enabled-runtime'):
@@ -160,6 +180,9 @@ def render_text(plan):
              'Target revision: '+plan['target_revision']]
     for row in plan['steps']:
         lines.append(row['component']+': '+row['status'])
+        if 'preserve_saved_mode' in row:
+            mode = row['preserve_saved_mode']
+            lines.append('  Preserve saved mode: '+mode['value']+' ('+mode['path']+')')
         lines.extend('  '+reason for reason in row['reasons'])
     lines.append('Apply is unavailable. Existing service states and configuration must be preserved.')
     return '\n'.join(lines)
@@ -169,7 +192,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--inventory', required=True, help='Audit JSON file, or - for stdin')
     parser.add_argument('--select', nargs='+', required=True,
-                        choices=['tcp-c2', 'spamhaus-output', 'auto-abuse-guard'])
+                        choices=['tcp-c2', 'spamhaus-output', 'spamhaus-udp', 'auto-abuse-guard'])
     parser.add_argument('--format', choices=['text', 'json'], default='text')
     args = parser.parse_args()
     try:

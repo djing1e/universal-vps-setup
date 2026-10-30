@@ -24,7 +24,16 @@ UNITS = (
     'xtls-c2-feed-update.timer', 'xtls-udp-abuse-restore.service',
     'xtls-spamhaus-output-restore.service', 'xtls-spamhaus-output-update.timer',
     'xtls-auto-abuse-guard.service', 'xtls-auto-abuse-guard.timer',
+    'xtls-spamhaus-udp-restore.service', 'xtls-smtp25-guard-restore.service',
+    'xtls-portscan-observe-restore.service',
 )
+SAVED_MODES = {
+    '/etc/xtls-c2-feed/mode': ('observe', 'block'),
+    '/etc/xtls-spamhaus-udp/mode': ('observe', 'block'),
+    '/etc/xtls-spamhaus-output/diagnostics-mode': ('enabled', 'disabled'),
+    '/etc/xtls-smtp25-guard/mode': ('observe', 'block', 'disabled'),
+    '/etc/xtls-portscan-observe/enabled': ('enabled', 'disabled'),
+}
 PROBES = {
     'containers': ['docker', '--host', 'unix:///var/run/docker.sock', 'ps', '-a', '--format',
                    '{"id":{{json .ID}},"name":{{json .Names}},"image":{{json .Image}},"state":{{json .State}}}'],
@@ -102,6 +111,8 @@ def unit_state(name, runner=probe):
         return {'status': 'absent', 'properties': fields}
     if fields.get('LoadState') != 'loaded':
         return {'status': 'unknown', 'properties': fields}
+    if not all(fields.get(key) for key in ('ActiveState', 'SubState')):
+        return {'status': 'unknown', 'properties': fields}
     return {'status': 'observed', 'properties': fields}
 
 
@@ -124,6 +135,26 @@ def file_fingerprint(path, expected, max_bytes=2*1024*1024):
     digest = hashlib.sha256(raw).hexdigest()
     return {'status': 'known_content' if digest in expected else 'custom_or_unknown',
             'sha256': digest, 'ownership': 'not_established'}
+
+
+def saved_mode(path, allowed):
+    """Read persisted intent only; never execute a module or infer live filtering."""
+    try:
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+            return {'status': 'unknown', 'reason': 'not_a_regular_file'}
+        with path.open('rb') as stream:
+            raw = stream.read(257)
+    except FileNotFoundError:
+        return {'status': 'absent'}
+    except OSError:
+        return {'status': 'unknown', 'reason': 'unreadable'}
+    if len(raw) > 256:
+        return {'status': 'unknown', 'reason': 'file_too_large'}
+    value = raw.decode('ascii', 'replace').strip()
+    if value not in allowed:
+        return {'status': 'unknown', 'reason': 'unrecognized_mode'}
+    return {'status': 'observed', 'value': value, 'scope': 'saved_only'}
 
 
 def os_identity(root):
@@ -150,7 +181,9 @@ def collect(root=Path('/'), runner=probe, manifest=None):
     units = {name: unit_state(name, runner) for name in UNITS}
     observations = {}
     for name, argv in PROBES.items():
-        if name == 'containers' and units['docker.service'].get('properties', {}).get('ActiveState') != 'active':
+        docker = units['docker.service']
+        if name == 'containers' and (docker['status'] != 'observed' or
+                                     docker.get('properties', {}).get('ActiveState') != 'active'):
             observations[name] = {'status': 'unknown', 'detail': 'Docker not confirmed active; daemon query skipped'}
         else:
             observations[name] = runner(argv)
@@ -159,12 +192,15 @@ def collect(root=Path('/'), runner=probe, manifest=None):
         'mode': 'audit', 'changes_applied': False,
         'os': os_identity(root), 'kernel': os.uname().release,
         'modules': files, 'services': units, 'probes': observations,
+        'saved_modes': {path: saved_mode(root/path.lstrip('/'), allowed)
+                        for path, allowed in SAVED_MODES.items()},
         'update_gate': 'manual_review_required',
         'limitations': [
             'No automatic update or ownership inference; known hashes only identify content.',
             'Probe errors, missing tools and output limits leave state unknown.',
             'No compose files, container environments, access logs or credentials are read.',
             'Snapshot is not atomic; no health or rollback guarantee is implied.',
+            'Saved modes describe intent only, not live firewall enforcement.',
             'Network probe output may contain private topology; review before sharing.',
         ],
     }
