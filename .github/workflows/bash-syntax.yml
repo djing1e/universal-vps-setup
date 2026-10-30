@@ -4,10 +4,14 @@ on:
   push:
     paths:
       - 'vps-setup.sh'
+      - 'modules/**'
+      - 'tests/**'
       - '.github/workflows/bash-syntax.yml'
   pull_request:
     paths:
       - 'vps-setup.sh'
+      - 'modules/**'
+      - 'tests/**'
       - '.github/workflows/bash-syntax.yml'
   workflow_dispatch:
 
@@ -25,4 +29,23 @@ jobs:
         shell: bash
         run: |
           bash -n vps-setup.sh
+          bash -n modules/xtls-c2-feed.sh
           echo 'Bash syntax OK'
+      - name: Auto Abuse Guard syntax and regression tests
+        shell: bash
+        run: |
+          bash -n modules/xtls-auto-abuse-guard-install.sh
+          python3 -m py_compile modules/xtls-auto-abuse-guard.py
+          sudo python3 -m unittest discover -s tests -v
+      - name: Real nftables conntrack direction and migration
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y nftables iproute2
+          ns="guard-diag-${GITHUB_RUN_ID}"
+          trap 'sudo ip netns del "$ns"' EXIT
+          sudo ip netns add "$ns"
+          sudo ip -n "$ns" link set lo up
+          sudo ip netns exec "$ns" python3 tests/check_spamhaus_direction.py
+      - name: C2 real nftables regression tests in a network namespace
+        run: sudo python3 tests/check_c2_real_nft.py
