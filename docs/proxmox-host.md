@@ -141,9 +141,12 @@ python3 lib/proxmox_host.py apply /root/proxmox-ssh-plan.json \
 rollback-кода сохраняется там же: таймер не зависит от последующих правок checkout.
 Для firewall кандидат сначала проверяет штатный Perl parser/compiler PVE из
 отдельного staging-файла, не записывая активный host.fw. Ошибки/предупреждения
-компиляции блокируют запись. Quiet preflight отвергает **любой непустой
-stdout/stderr**, даже при exit 0: PVE может перехватить parser exception и
-продолжить compile. `__WARN__` устанавливается до импорта модулей и перед parse.
+компиляции блокируют запись. Preflight требует единственный JSON-export compiled rulesets/ipsets и отвергает
+любой дополнительный stdout/stderr, даже при exit 0: PVE может перехватить
+parser exception и продолжить compile. Пустой вывод тоже не считается успехом.
+Каждое ожидаемое правило сверяется по семейству, source CIDR, TCP, порту и
+нативному действию RETURN в PVEFW-HOST-IN; наличие строки в чужой цепочке
+или другом семействе не засчитывается. `__WARN__` устанавливается до импорта модулей и перед parse.
 На данной облачной машине этот PVE compiler
 недоступен: протокол проверен mocks, реальная совместимость требует стенда PVE 9.2.
 
@@ -226,10 +229,47 @@ python3 lib/proxmox_host.py validate-candidate /tmp/pve-candidate.fw
 
 Команда `validate-candidate` читает отдельный файл и использует PVE parser/compiler;
 не записывает активные host/cluster rules и не вызывает reload/restart/apply.
-Она проверяет, что единственная Host option — `enable: 1`, и отвергает любые
-parser diagnostics независимо от exit status. Успех возвращает
+Она проверяет, что единственная Host option — `enable: 1`, отвергает любые
+parser diagnostics независимо от exit status и сверяет ожидаемые правила с
+compiled JSON. Тихое исчезновение правила — ошибка. Успех семантической сверки возвращает
 `management_access_verified: false`: это **не** доказательство соответствия
 реального доступа allowlist. Изменение Datacenter RULES, security groups,
 management ipset и встроенных local_network/management exceptions должно быть
 проверено по эффективным IPv4/IPv6 rulesets и внешним тестам на отдельном стенде.
 На рабочем `hilocaladmin` в этой задаче не выполнялось ни Apply, ни эта проверка.
+
+## Офлайн-анализ compiled артефактов
+
+```sh
+python3 lib/proxmox_host.py analyze-compiled candidate.fw compiled.json
+```
+
+`compiled.json` должен содержать `schema_version: 1`, `ipv4` и `ipv6` — словари
+filter chain → массив строк `-A <chain> ...`, и `ipsets` — словарь имени ipset →
+массив native `create`/`add` команд, полученных из той же компиляции кандидата.
+Текстовый вывод CLI `pve-firewall compile` не является этим JSON-форматом.
+Native exporter встроен в `validate-candidate`; эта задача не запускала его на
+production и не получила полный raw JSON с хоста. Не преобразовывайте
+артефакты с потерей неизвестных цепочек/правил ради успешного анализа.
+
+Отчёт содержит missing rules, members management-v4/v6, неизвестные set entries,
+порядок вызовов цепочек с индексом продолжения caller и потенциальные пути к
+management-портам вне запрошенного scope. RETURN — native реализация host ACCEPT,
+**не окончательный вердикт**; анализ фиксирует необходимость продолжить caller.
+Даже target ACCEPT в одной цепочке не доказывает отсутствие последующих drop в
+полной системе. Этот анализ структурный и консервативный, не symbolic packet
+simulator: unknown match/target, goto, cycles, отсутствующий set или входная
+цепочка не могут дать разрешение Apply. Возможны ложноположительные риски, когда
+предшествующие правила или caller conditions исключают пакет.
+
+Порты 3128, 5900:5999 и 60000:60050 могут появляться из **встроенных management
+exceptions PVE**, независимо от запроса SPICE в кандидате. Флаг `--spice`
+управляет только сгенерированными host rules и не выключает встроенные правила.
+Их наличие отмечается как потенциальное дополнительное разрешение, а не как
+доказанная доступность сервиса. Необходим анализ всех caller/return путей,
+содержимого set, kernel INPUT hooks и live policy; эти проверки не завершены.
+`activation_allowed` и `management_access_verified` остаются false.
+
+Production-проверки на `hilocaladmin` остановлены. Для следующего этапа нужны
+сохранённые артефакты и/или отдельный disposable PVE-стенд, не новые испытания
+на рабочем сервере.

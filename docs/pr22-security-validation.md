@@ -142,3 +142,56 @@ Bash syntax и Python compilation также прошли.
 подключение к нему не использовалось. Реальное подтверждение отсутствия обходов
 allowlist и сетевой доступности по-прежнему **NOT RUN**. Черновой статус PR и
 запрет production rollout остаются в силе; эти пункты не выдаются за закрытые.
+
+## Semantic validation после обнаружения тихого пропуска правил
+
+Данные пользователя об установленном pve-firewall 6.0.6 показали: отсутствие
+diagnostics также не доказывает корректность. Невалидный source/protocol может
+исчезнуть из compiled rulesets без ошибки. Проверка quiet exit из предыдущего
+раздела заменена строгим JSON-export и семантической сверкой.
+
+Текущий preflight получает filter chain maps IPv4/IPv6 и ipsets непосредственно
+из возвращаемых значений той же `compile($cluster,$candidate)`; требует полный
+поддерживаемый JSON, отвергает диагностику до/после JSON и отсутствие экспорта.
+Для каждого expected Host ACCEPT требуется соответствующее native RETURN-правило
+в PVEFW-HOST-IN нужного семейства с теми же source CIDR, TCP и dport. Совпадение
+в другой цепочке/семействе, другой source/port/protocol/action или тихое
+исчезновение — отказ. Некорректные candidate source/protocol отвергаются ещё
+до запуска компилятора. Неизвестные форматы не засчитываются как совпадения.
+
+`lib/pve_compiled.py` дополнительно извлекает management-v4/v6 members и обходит
+compiled input call graph в порядке правил. В отчёте есть caller, индекс jump,
+callee и индекс продолжения. RETURN не объявляется окончательным ACCEPT;
+unknown targets/goto/cycles/missing sets и потенциальные широкие management
+пути сохраняют запрещающее состояние. Для ipset проверяются семейство и
+покрытие известными admin CIDR; nomatch/неизвестные форматы не дают положительного
+доказательства. Диапазоны 5900:5999, 60000:60050 и SPICE 3128 выявляются отдельно
+как возможные native management exceptions, не запрошенные генератором.
+
+**Это структурный консервативный анализ, не полноценная симуляция пакета.**
+Он не подтверждает kernel INPUT hooks, все caller predicates/continuations,
+другие таблицы и окончательный live verdict. Потенциальный путь RETURN может
+завершиться DROP в caller; отчёт не объявляет его доказанной доступностью.
+Ни чистая семантическая сверка, ни пустой список найденных рисков не открывают
+Apply: `activation_allowed=false`, `management_access_verified=false`.
+
+Офлайн-команда и формат snapshot описаны в `proxmox-host.md`:
+`analyze-compiled candidate.fw compiled.json`. Новые fixtures **синтетические**,
+соответствуют форме native compiler output и наблюдениям пользователя, но не
+выдаются за raw capture с hilocaladmin. Полный реальный JSON в эту задачу пока
+не передан; проверка его установленной версией остаётся NOT RUN.
+
+Итоговые проверки: **148/148 OK** от root в одноразовом Debian 13 Docker,
+без skipped/disabled. Включены 33 теста профиля и 9 новых тестов compiled
+semantics/management graph. Bash syntax, Python compilation и `git diff --check`
+прошли. Root suite:
+
+```text
+Ran 148 tests in 9.667s
+
+OK
+```
+
+Тесты на production остановлены. Никаких подключений/команд на hilocaladmin
+не выполнялось; дальнейшая разработка — по сохранённым артефактам и на отдельном
+стенде. PR остаётся draft, production rollout запрещён.

@@ -17,8 +17,21 @@ sys.path.insert(0, str(ROOT/'lib'))
 import proxmox_host as host
 import vps_inventory as inventory
 import vps_update_plan as updates
+from test_pve_compiled import fixture as compiled_fixture
 
 ADMINS = ['8.8.8.8/32', '2606:4700:4700::1111/128']
+
+
+def compiler_result(argv):
+    if argv[0] != 'perl':
+        return ''
+    from pve_compiled import expected_rules
+    snapshot = compiled_fixture()
+    for family in (4, 6):
+        snapshot['ipv'+str(family)]['PVEFW-HOST-IN'] = [
+            f'-A PVEFW-HOST-IN -s {source} -p tcp --dport {port} -j RETURN'
+            for f, source, _, port in expected_rules(Path(argv[-1]).read_text()) if f == family]
+    return json.dumps(snapshot)
 
 
 class ProxmoxTests(unittest.TestCase):
@@ -138,7 +151,7 @@ class ProxmoxTests(unittest.TestCase):
         for output in ('warning: unknown option', 'errors in config', 'parser warning on stderr'):
             with patch.object(host, 'run', return_value=output):
                 with self.assertRaisesRegex(ValueError, 'diagnostics'): host.validate_candidate(path)
-        with patch.object(host, 'run', return_value=''):
+        with patch.object(host, 'run', side_effect=compiler_result):
             host.validate_candidate(path)
 
     def test_preflight_diagnostics_never_arm_timer_or_write_host(self):
@@ -204,7 +217,7 @@ class ProxmoxTests(unittest.TestCase):
         before = self.snapshot(); commands = []
         def run(argv):
             commands.append(argv)
-            return ''
+            return compiler_result(argv)
         with patch.object(host, 'run', side_effect=run):
             result = self.apply(self.plan())
             path = self.root/'etc/pve/nodes/testnode/host.fw'
@@ -222,7 +235,7 @@ class ProxmoxTests(unittest.TestCase):
     def test_timer_failure_never_writes_host_config(self):
         def run(argv):
             if argv[0] == 'systemd-run': raise RuntimeError('timer failure')
-            return ''
+            return compiler_result(argv)
         with patch.object(host, 'run', side_effect=run):
             with self.assertRaises(RuntimeError): self.apply(self.plan())
         self.assertFalse((self.root/'etc/pve/nodes/testnode/host.fw').exists())
@@ -234,13 +247,13 @@ class ProxmoxTests(unittest.TestCase):
                 # Fail only the initial post-write check; permit rollback check.
                 if not getattr(run, 'failed', False):
                     run.failed = True; raise RuntimeError('compile failure')
-            return ''
+            return compiler_result(argv)
         with patch.object(host, 'run', side_effect=run):
             with self.assertRaises(RuntimeError): self.apply(self.plan())
         self.assertFalse((self.root/'etc/pve/nodes/testnode/host.fw').exists())
 
     def test_commit_requires_independent_verification_and_deadline(self):
-        with patch.object(host, 'run', return_value=''):
+        with patch.object(host, 'run', side_effect=compiler_result):
             result = self.apply(self.plan())
             txn = Path(result['transaction'])
             with self.assertRaises(ValueError): host.commit(txn, 'yes')
@@ -257,7 +270,7 @@ class ProxmoxTests(unittest.TestCase):
             commands.append(argv)
             if argv == ['sshd', '-T']:
                 return 'pubkeyauthentication yes\npasswordauthentication yes\n'
-            return ''
+            return compiler_result(argv)
         with patch.object(host, 'run', side_effect=run):
             with self.assertRaises(ValueError): self.apply(self.plan('ssh'))
         self.assertFalse((self.root/'etc/ssh/sshd_config.d/00-proxmox-host.conf').exists())
@@ -266,7 +279,7 @@ class ProxmoxTests(unittest.TestCase):
 
     def test_idempotent_apply_and_stale_plan(self):
         p = self.plan(); path = self.root/'etc/pve/nodes/testnode/host.fw'
-        with patch.object(host, 'run', return_value=''):
+        with patch.object(host, 'run', side_effect=compiler_result):
             result = self.apply(p)
             host.commit(Path(result['transaction']), 'VERIFIED SSH UI IPV4 IPV6 AND GUESTS')
             with self.assertRaises(ValueError): self.apply(p)
@@ -277,7 +290,7 @@ class ProxmoxTests(unittest.TestCase):
         for op in ('ufw', 'docker', 'xanmod', 'nextdns', 'C2', 'network'):
             with self.assertRaises(ValueError): host.make_plan(self.audit(), op)
         self.assertIn('banaction = dummy', self.plan('fail2ban')['content'])
-        with patch.object(host, 'run', return_value=''):
+        with patch.object(host, 'run', side_effect=compiler_result):
             self.assertEqual(self.apply(self.plan('sysctl-advice'))['status'], 'advisory_only')
 
     def test_inventory_and_legacy_planner_mark_proxmox(self):
@@ -326,7 +339,7 @@ class ProxmoxTests(unittest.TestCase):
                 code = "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import proxmox_host as h; h.run=lambda argv: ''; h.rollback(Path(sys.argv[2]))"
                 subprocess.run([sys.executable, '-c', code, str(ROOT/'lib'), str(txn)],
                                check=True, timeout=5, capture_output=True)
-            return ''
+            return compiler_result(argv)
         with patch.object(host, 'run', side_effect=run):
             with self.assertRaisesRegex(ValueError, 'rolled back'):
                 self.apply(self.plan())
@@ -339,14 +352,14 @@ class ProxmoxTests(unittest.TestCase):
                 state = json.loads((txn/'state.json').read_text())
                 # Use a future clock for the final deadline check, not timer mocks.
                 clock.return_value = state['deadline'] + 1
-            return ''
+            return compiler_result(argv)
         with patch.object(host.time, 'time', return_value=time.time()) as clock, patch.object(host, 'run', side_effect=run):
             with self.assertRaisesRegex(ValueError, 'expired'):
                 self.apply(self.plan())
         self.assertFalse((self.root/'etc/pve/nodes/testnode/host.fw').exists())
 
     def test_commit_cannot_attest_before_apply_completed(self):
-        with patch.object(host, 'run', return_value=''):
+        with patch.object(host, 'run', side_effect=compiler_result):
             result = self.apply(self.plan())
         txn = Path(result['transaction']); (txn/'applied').unlink()
         with self.assertRaisesRegex(ValueError, 'not completed'):
@@ -369,7 +382,7 @@ class ProxmoxTests(unittest.TestCase):
         path = self.root/'etc/pve/nodes/testnode/host.fw'
         original = host.firewall_content(ADMINS)
         path.write_text(original)
-        with patch.object(host, 'run', return_value=''):
+        with patch.object(host, 'run', side_effect=compiler_result):
             result = self.apply(self.plan(spice=True))
             self.assertIn('3128', path.read_text())
             host.rollback(Path(result['transaction']))

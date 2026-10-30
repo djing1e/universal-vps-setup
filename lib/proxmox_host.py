@@ -295,17 +295,38 @@ def validate_candidate(path):
                     if line.strip() and not line.lstrip().startswith('#')]
     if option_lines != ['enable: 1']:
         raise ValueError('unsupported Host options: this profile permits only enable: 1')
-    diagnostics = run(['perl', '-e',
+    try:
+        from .pve_compiled import expected_rules
+    except ImportError:
+        from pve_compiled import expected_rules
+    expected = expected_rules(text)
+    output = run(['perl', '-e',
         'BEGIN { $SIG{__WARN__}=sub { die @_ }; } '
-        'use PVE::Cluster; use PVE::Firewall; PVE::Cluster::cfs_update(); '
+        'use JSON::PP; use PVE::Cluster; use PVE::Firewall; PVE::Cluster::cfs_update(); '
         '$SIG{__WARN__}=sub { die @_ }; '
         'my $c=PVE::Firewall::load_clusterfw_conf(); '
         'my $h=PVE::Firewall::load_hostfw_conf($c,$ARGV[0]); '
-        'PVE::Firewall::compile($c,$h);', str(path)])
-    # Some parser errors are caught internally and merely printed with exit 0.
-    # probe merges stderr/stdout: even those diagnostics must reject preflight.
-    if diagnostics.strip():
-        raise ValueError('PVE candidate parser/compiler emitted diagnostics: '+diagnostics[:1000])
+        'my ($v4,$sets,$v6,$eb)=PVE::Firewall::compile($c,$h); '
+        'print JSON::PP->new->canonical->encode({schema_version=>1, '
+        'ipv4=>$v4->{filter},ipv6=>$v6->{filter},ipsets=>$sets});', str(path)])
+    # Diagnostics before/after JSON, including swallowed parser warnings with
+    # exit 0, are rejected. A quiet exit without an exported ruleset also fails.
+    try:
+        snapshot = json.loads(output)
+    except (ValueError, TypeError) as error:
+        raise ValueError('PVE compiler diagnostics or missing JSON ruleset') from error
+    return validate_compiled(snapshot, expected)
+
+
+def validate_compiled(snapshot, expected):
+    try:
+        from .pve_compiled import analyze
+    except ImportError:
+        from pve_compiled import analyze
+    result = analyze(snapshot, expected)
+    if not result['semantic_rules_verified']:
+        raise ValueError('PVE silently omitted or changed expected rules: '+json.dumps(result['missing_rules']))
+    return result
 
 
 def validate_ssh_effective(effective):
@@ -441,7 +462,7 @@ def apply(plan, args, root=Path('/'), runner=probe):
         (transaction/'before').write_bytes(previous)
     (transaction/'state.json').write_text(json.dumps(state))
     # Snapshot self and dependency so edits/deletions of the checkout cannot break rollback.
-    for name in ('proxmox_host.py', 'vps_inventory.py'):
+    for name in ('proxmox_host.py', 'vps_inventory.py', 'pve_compiled.py'):
         shutil.copyfile(Path(__file__).with_name(name), transaction/name)
     try:
         if op == 'firewall':
@@ -527,6 +548,9 @@ def main():
     sub.add_parser('audit')
     validation = sub.add_parser('validate-candidate')
     validation.add_argument('candidate', type=Path)
+    offline = sub.add_parser('analyze-compiled')
+    offline.add_argument('candidate', type=Path)
+    offline.add_argument('snapshot', type=Path)
     plan = sub.add_parser('plan')
     plan.add_argument('operation', choices=['firewall', 'ssh', 'fail2ban', 'crowdsec-observe', 'sysctl-advice'])
     plan.add_argument('--admin', action='append', default=[])
@@ -548,9 +572,16 @@ def main():
         if args.action == 'audit':
             output = audit()
         elif args.action == 'validate-candidate':
-            validate_candidate(args.candidate)
-            output = {'status': 'candidate_preflight_passed', 'changes_applied': False,
-                      'management_access_verified': False}
+            output = validate_candidate(args.candidate)
+            output.update(status='candidate_rules_verified_access_unverified', changes_applied=False)
+        elif args.action == 'analyze-compiled':
+            try:
+                from .pve_compiled import expected_rules
+            except ImportError:
+                from pve_compiled import expected_rules
+            output = validate_compiled(json.loads(read_file(args.snapshot)),
+                                       expected_rules(read_file(args.candidate).decode('utf-8')))
+            output['changes_applied'] = False
         elif args.action == 'plan':
             output = make_plan(audit(), args.operation, args.admin, args.spice, args.dynamic_admin)
         elif args.action == 'apply':
