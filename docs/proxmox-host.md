@@ -87,11 +87,19 @@ python3 lib/proxmox_host.py plan firewall \
    проверены. Сохраните существующее SSH-соединение, откройте консоль провайдера.
 
 Кандидат содержит только host INPUT ACCEPT TCP 22, 8006 и опционально 3128 от
-allowlist, `policy_in: DROP`, `policy_out: ACCEPT`. Системные правила PVE для
+allowlist. В Host OPTIONS записывается **только `enable: 1`**. Политики
+`policy_in`/`policy_out` принадлежат Datacenter, не Host. Audit/Plan показывают
+явные значения и отдельно предположения о defaults для pve-firewall 6.0.6;
+предположение не считается проверенным эффективным значением. Для планирования
+активации требуются явные Datacenter `policy_in: DROP`, `policy_out: ACCEPT`,
+но даже они не доказывают отсутствие более ранних ACCEPT. Системные правила PVE для
 established traffic, ICMP/NDP остаются ответственностью native backend. Это не
 изолированный генератор всех правил PVE: существующие cluster rules и встроенные
-management exceptions надо проверить вручную. Он не гарантирует, что другие
-правила не разрешают доступ. FORWARD, bridges, VM rules, MAC, диски и NIC flags
+management exceptions могут разрешать доступ в обход Host allowlist.
+Поэтому **firewall Apply сейчас всегда заблокирован**: пока нет валидатора
+эффективных compiled management-путей и стендового подтверждения, статус
+`management_access.activation_allowed` остаётся false. Флага ручного обхода
+этой блокировки нет. Другие allowlisted операции этим ограничением не меняются. FORWARD, bridges, VM rules, MAC, диски и NIC flags
 не меняются. Изменение файла может быть подхвачено daemon автоматически: поэтому
 таймер отката запускается **до** записи активного файла.
 
@@ -133,7 +141,10 @@ python3 lib/proxmox_host.py apply /root/proxmox-ssh-plan.json \
 rollback-кода сохраняется там же: таймер не зависит от последующих правок checkout.
 Для firewall кандидат сначала проверяет штатный Perl parser/compiler PVE из
 отдельного staging-файла, не записывая активный host.fw. Ошибки/предупреждения
-компиляции блокируют запись. На данной облачной машине этот PVE compiler
+компиляции блокируют запись. Quiet preflight отвергает **любой непустой
+stdout/stderr**, даже при exit 0: PVE может перехватить parser exception и
+продолжить compile. `__WARN__` устанавливается до импорта модулей и перед parse.
+На данной облачной машине этот PVE compiler
 недоступен: протокол проверен mocks, реальная совместимость требует стенда PVE 9.2.
 
 Затем независимый systemd timer запускается **до** изменения системного файла.
@@ -200,3 +211,25 @@ Watchdog не ждёт транзакционный lock во время дли�
 Актуальные результаты, незакрытые проверки PVE и процедура стендового испытания:
 [pr22-security-validation.md](pr22-security-validation.md). При отсутствии такого
 стенда критические операции остаются **не подтверждены для production**.
+
+## Повторная проверка кандидата без применения
+
+На машине с установленным pve-firewall используйте полный checkout текущей
+ветки и кандидат, созданный **исправленным** генератором:
+
+```sh
+python3 lib/proxmox_host.py plan firewall \
+  --admin '<ADMIN_IPV4>/32' --admin '<ADMIN_IPV6>/128' > /tmp/pve-plan.json
+python3 -c 'import json,pathlib; p=json.load(open("/tmp/pve-plan.json")); pathlib.Path("/tmp/pve-candidate.fw").write_text(p["content"])'
+python3 lib/proxmox_host.py validate-candidate /tmp/pve-candidate.fw
+```
+
+Команда `validate-candidate` читает отдельный файл и использует PVE parser/compiler;
+не записывает активные host/cluster rules и не вызывает reload/restart/apply.
+Она проверяет, что единственная Host option — `enable: 1`, и отвергает любые
+parser diagnostics независимо от exit status. Успех возвращает
+`management_access_verified: false`: это **не** доказательство соответствия
+реального доступа allowlist. Изменение Datacenter RULES, security groups,
+management ipset и встроенных local_network/management exceptions должно быть
+проверено по эффективным IPv4/IPv6 rulesets и внешним тестам на отдельном стенде.
+На рабочем `hilocaladmin` в этой задаче не выполнялось ни Apply, ни эта проверка.

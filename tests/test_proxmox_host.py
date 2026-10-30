@@ -29,7 +29,7 @@ class ProxmoxTests(unittest.TestCase):
         self.calls = []
         for name, value in {
             'etc/os-release': 'ID=debian\nVERSION_ID="13"\n',
-            'etc/pve/firewall/cluster.fw': '[OPTIONS]\nenable: 1\n',
+            'etc/pve/firewall/cluster.fw': '[OPTIONS]\nenable: 1\npolicy_in: DROP\npolicy_out: ACCEPT\n',
             'etc/network/interfaces': 'vmbr0 enp5s0\nvmbr1 10.77.77.1/24\n',
             'etc/pve/qemu-server/101.conf': 'net0: virtio=00:50:56:01:29:1A,bridge=vmbr0\n',
             'etc/pve/qemu-server/102.conf': 'net0: virtio=00:50:56:01:24:12,bridge=vmbr0\n',
@@ -37,6 +37,11 @@ class ProxmoxTests(unittest.TestCase):
             path = self.root/name; path.parent.mkdir(parents=True, exist_ok=True); path.write_text(value)
         for d in ('etc/pve/nodes/testnode', 'etc/ssh/sshd_config.d', 'etc/fail2ban/jail.d'):
             (self.root/d).mkdir(parents=True, exist_ok=True)
+        # Transaction tests isolate the mechanism from the intentionally closed
+        # production gate for unverified compiled management exceptions.
+        self.real_access_review = host.management_access_review
+        access = patch.object(host, 'management_access_review', return_value={'status': 'fixture_only', 'activation_allowed': True})
+        access.start(); self.addCleanup(access.stop)
         self.args = SimpleNamespace(confirm=host.CONFIRM, console_confirmed=True,
                                     rollback_confirmed=True, key_login_confirmed=True, rollback_seconds=180)
         self.outputs = {
@@ -91,6 +96,67 @@ class ProxmoxTests(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
         forbidden = {'install', 'restart', 'reload', 'set', 'exec', 'guest-exec', 'add', 'delete'}
         self.assertFalse(any(forbidden.intersection(argv) for argv in self.calls))
+
+    def test_host_options_never_include_datacenter_policies(self):
+        candidate = host.firewall_content(ADMINS)
+        options = candidate.split('[OPTIONS]\n')[1].split('[RULES]')[0].strip()
+        self.assertEqual(options, 'enable: 1')
+        self.assertNotIn('policy_in', candidate)
+        self.assertNotIn('policy_out', candidate)
+
+    def test_audit_reports_datacenter_policy_sources(self):
+        report = self.audit()
+        self.assertEqual(report['datacenter']['policies']['policy_in']['declared'], 'DROP')
+        path = self.root/'etc/pve/firewall/cluster.fw'
+        path.write_text('[OPTIONS]\nenable: 1\n')
+        p = self.plan()
+        self.assertTrue(any('policy_in' in reason for reason in p['blockers']))
+        self.assertIn('assumed', self.audit()['datacenter']['policies']['policy_in']['source'])
+        path.write_text('[OPTIONS]\nenable: 1\npolicy_in: ACCEPT\npolicy_out: DROP\n')
+        self.assertTrue(any('Host cannot override' in reason for reason in self.plan()['blockers']))
+
+    def test_builtin_and_datacenter_bypasses_cannot_be_certified_by_host_file(self):
+        with patch.object(host, 'management_access_review', self.real_access_review):
+            p = self.plan()
+            self.assertFalse(p['management_access']['activation_allowed'])
+            self.assertTrue(p['blockers'])
+            with self.assertRaises(ValueError): self.apply(p)
+            path = self.root/'etc/pve/firewall/cluster.fw'
+            path.write_text(path.read_text()+'[RULES]\nIN ACCEPT -p tcp -dport 8006\n[IPSET management]\n8.8.4.4\n')
+            p = self.plan()
+            self.assertTrue(p['management_access']['datacenter_rules_present'])
+            self.assertTrue(p['management_access']['management_ipset_present'])
+            self.assertTrue(p['blockers'])
+
+    def test_invalid_host_options_and_zero_exit_diagnostics_reject_preflight(self):
+        path = self.root/'candidate.fw'
+        path.write_text(host.firewall_content(ADMINS).replace('enable: 1', 'enable: 1\npolicy_in: DROP'))
+        with patch.object(host, 'run') as run:
+            with self.assertRaisesRegex(ValueError, 'unsupported Host options'): host.validate_candidate(path)
+            run.assert_not_called()
+        path.write_text(host.firewall_content(ADMINS))
+        for output in ('warning: unknown option', 'errors in config', 'parser warning on stderr'):
+            with patch.object(host, 'run', return_value=output):
+                with self.assertRaisesRegex(ValueError, 'diagnostics'): host.validate_candidate(path)
+        with patch.object(host, 'run', return_value=''):
+            host.validate_candidate(path)
+
+    def test_preflight_diagnostics_never_arm_timer_or_write_host(self):
+        commands = []
+        def run(argv):
+            commands.append(argv)
+            return 'config parser: unknown option' if argv[0] == 'perl' else ''
+        with patch.object(host, 'run', side_effect=run):
+            with self.assertRaisesRegex(ValueError, 'diagnostics'):
+                self.apply(self.plan())
+        self.assertFalse((self.root/'etc/pve/nodes/testnode/host.fw').exists())
+        self.assertFalse(any(argv[0] == 'systemd-run' for argv in commands))
+
+    def test_duplicate_datacenter_options_are_not_accepted(self):
+        path = self.root/'etc/pve/firewall/cluster.fw'
+        path.write_text(path.read_text()+'policy_in: ACCEPT\n')
+        self.assertTrue(self.plan()['datacenter']['parse_errors'])
+        self.assertTrue(self.plan()['blockers'])
 
     def test_native_plan_host_only_dual_stack(self):
         p = self.plan(spice=True)

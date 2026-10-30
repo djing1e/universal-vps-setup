@@ -113,6 +113,7 @@ def audit(root=Path('/'), runner=probe, node=None):
             report['files'][name] = item
         except (OSError, ValueError, UnicodeError):
             report['files'][name] = {'status': 'unknown'}
+    report['datacenter'] = datacenter_policy(report['files'].get('/etc/pve/firewall/cluster.fw', {}))
     # Ping only, never guest-exec or read VM configuration (which can include secrets).
     guests = report['probes']['guests']
     report['guest_agent'] = {}
@@ -140,9 +141,57 @@ def admin_networks(values):
     return sorted({str(n) for n in networks})
 
 
+def datacenter_policy(item):
+    """Report declared options separately from version-dependent default assumptions."""
+    sections = {}; section = None; errors = []
+    for raw in item.get('content', '').splitlines():
+        line = raw.split('#', 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith('[') and line.endswith(']'):
+            section = line[1:-1]
+            if section in sections:
+                errors.append('duplicate section: '+section)
+            sections.setdefault(section, [])
+        elif section is None:
+            errors.append('content outside section')
+        else:
+            sections[section].append(line)
+    options = {}
+    for line in sections.get('OPTIONS', []):
+        if ':' not in line:
+            errors.append('invalid Datacenter option'); continue
+        key, value = (part.strip() for part in line.split(':', 1))
+        if key in options:
+            errors.append('duplicate option: '+key)
+        options[key] = value
+    policies = {}
+    for name, default in (('policy_in', 'DROP'), ('policy_out', 'ACCEPT')):
+        value = options.get(name)
+        if value is not None and value not in ('DROP', 'REJECT', 'ACCEPT'):
+            errors.append('invalid '+name)
+        policies[name] = {'declared': value, 'effective_candidate': value or default,
+                          'source': 'explicit' if value is not None else 'assumed_pve_6.0.6_default_requires_verification'}
+    return {'status': item.get('status', 'unknown'), 'options': options,
+            'policies': policies, 'parse_errors': errors,
+            'active_rule_lines': sections.get('RULES', []),
+            'management_ipset': sections.get('IPSET management', []),
+            'other_sections': [key for key in sections if key not in ('OPTIONS', 'RULES', 'IPSET management')]}
+
+
+def management_access_review(cluster, admins):
+    # A file-level allowlist cannot prove the earlier compiled PVE accept paths.
+    # Keep activation closed until a version-specific effective ruleset validator exists.
+    return {'status': 'unverified', 'activation_allowed': False,
+            'datacenter_rules_present': bool(cluster['active_rule_lines']),
+            'management_ipset_present': bool(cluster['management_ipset']),
+            'reason': 'Compiled Datacenter rules and built-in management/local_network exceptions '
+                      'have not been proven to restrict management access to the admin allowlist'}
+
+
 def firewall_content(admins, spice=False):
     lines = ['# Managed by universal-vps-setup Proxmox Host', '[OPTIONS]',
-             'enable: 1', 'policy_in: DROP', 'policy_out: ACCEPT', '', '[RULES]']
+             'enable: 1', '', '[RULES]']
     for network in admin_networks(admins):
         for port in [22, 8006] + ([3128] if spice else []):
             lines.append(f'IN ACCEPT -source {network} -p tcp -dport {port}')
@@ -162,12 +211,22 @@ def make_plan(report, operation, admins=(), spice=False, dynamic_admin=False):
     blockers = []
     content = None
     destination = paths(node).get(operation)
+    cluster_policy = datacenter_policy(report['files'].get('/etc/pve/firewall/cluster.fw', {}))
+    access_review = None
     if operation == 'firewall':
         content = firewall_content(admins, spice)
         cluster = report['files'].get('/etc/pve/firewall/cluster.fw', {})
         if cluster.get('status') != 'observed' or not re.search(
                 r'(?m)^enable:\s*1[ \t]*$', cluster.get('content', '').split('[OPTIONS]', 1)[-1].split('[', 1)[0]):
             blockers.append('Datacenter firewall must already be enabled and reviewed manually; this tool never changes cluster policy')
+        if cluster_policy['parse_errors']:
+            blockers.append('Datacenter options cannot be interpreted safely')
+        for name, required in (('policy_in', 'DROP'), ('policy_out', 'ACCEPT')):
+            if cluster_policy['policies'][name]['declared'] != required:
+                blockers.append('Datacenter '+name+' must explicitly be '+required+'; Host cannot override it')
+        access_review = management_access_review(cluster_policy, admins)
+        if not access_review['activation_allowed']:
+            blockers.append(access_review['reason'])
         current = report['files'].get(destination, {})
         if current.get('status') not in ('observed', 'absent'):
             blockers.append('host firewall file state unknown')
@@ -203,6 +262,7 @@ def make_plan(report, operation, admins=(), spice=False, dynamic_admin=False):
             'before_sha256': report['files'].get(destination, {}).get('sha256'),
             'cluster_sha256': report['files'].get('/etc/pve/firewall/cluster.fw', {}).get('sha256'),
             'changes_applied': False,
+            'datacenter': cluster_policy, 'management_access': access_review,
             'invariants': {key: fingerprint(json.dumps(report['probes'][key], sort_keys=True).encode())
                            for key in ('guests', 'containers', 'bridges', 'addresses', 'ipv4_routes', 'ipv6_routes', 'ssh_effective')},
             'protected': ['VM/CT configuration', 'bridges', 'routes', 'DNS', 'kernel',
@@ -220,6 +280,32 @@ def run(argv):
     if result['status'] != 'ok':
         raise RuntimeError('command failed: '+ ' '.join(argv)+': '+result.get('output', '')[:1000])
     return result.get('output', '')
+
+
+def validate_candidate(path):
+    """Read-only preflight. All output from the quiet PVE parser is a failure."""
+    raw = read_file(path)
+    if raw is None:
+        raise ValueError('candidate missing')
+    text = raw.decode('utf-8')
+    options = text.split('[OPTIONS]', 1)
+    if len(options) != 2 or '[RULES]' not in options[1]:
+        raise ValueError('candidate requires OPTIONS and RULES')
+    option_lines = [line.strip() for line in options[1].split('[RULES]', 1)[0].splitlines()
+                    if line.strip() and not line.lstrip().startswith('#')]
+    if option_lines != ['enable: 1']:
+        raise ValueError('unsupported Host options: this profile permits only enable: 1')
+    diagnostics = run(['perl', '-e',
+        'BEGIN { $SIG{__WARN__}=sub { die @_ }; } '
+        'use PVE::Cluster; use PVE::Firewall; PVE::Cluster::cfs_update(); '
+        '$SIG{__WARN__}=sub { die @_ }; '
+        'my $c=PVE::Firewall::load_clusterfw_conf(); '
+        'my $h=PVE::Firewall::load_hostfw_conf($c,$ARGV[0]); '
+        'PVE::Firewall::compile($c,$h);', str(path)])
+    # Some parser errors are caught internally and merely printed with exit 0.
+    # probe merges stderr/stdout: even those diagnostics must reject preflight.
+    if diagnostics.strip():
+        raise ValueError('PVE candidate parser/compiler emitted diagnostics: '+diagnostics[:1000])
 
 
 def validate_ssh_effective(effective):
@@ -361,12 +447,7 @@ def apply(plan, args, root=Path('/'), runner=probe):
         if op == 'firewall':
             candidate = transaction/'candidate.fw'
             candidate.write_text(plan['content'])
-            run(['perl', '-e',
-                 'use PVE::Cluster; use PVE::Firewall; PVE::Cluster::cfs_update(); '
-                 '$SIG{__WARN__}=sub { die @_ }; '
-                 'my $c=PVE::Firewall::load_clusterfw_conf(); '
-                 'my $h=PVE::Firewall::load_hostfw_conf($c,$ARGV[0]); '
-                 'PVE::Firewall::compile($c,$h);', str(candidate)])
+            validate_candidate(candidate)
         watchdog = 'proxmox-host-' + transaction.name
         run(['systemd-run', '--unit='+watchdog, '--on-active='+str(args.rollback_seconds)+'s',
              '--timer-property=AccuracySec=1s', sys.executable, str(transaction/'proxmox_host.py'),
@@ -444,6 +525,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='action', required=True)
     sub.add_parser('audit')
+    validation = sub.add_parser('validate-candidate')
+    validation.add_argument('candidate', type=Path)
     plan = sub.add_parser('plan')
     plan.add_argument('operation', choices=['firewall', 'ssh', 'fail2ban', 'crowdsec-observe', 'sysctl-advice'])
     plan.add_argument('--admin', action='append', default=[])
@@ -464,6 +547,10 @@ def main():
     try:
         if args.action == 'audit':
             output = audit()
+        elif args.action == 'validate-candidate':
+            validate_candidate(args.candidate)
+            output = {'status': 'candidate_preflight_passed', 'changes_applied': False,
+                      'management_access_verified': False}
         elif args.action == 'plan':
             output = make_plan(audit(), args.operation, args.admin, args.spice, args.dynamic_admin)
         elif args.action == 'apply':

@@ -103,3 +103,42 @@ gate, не доказательство отсутствия всех возмо
 Любой NOT RUN в критических PVE/network/systemd пунктах сохраняет запрет на
 production rollout. Ручное ревью всего diff, а не только выбранных функций,
 по-прежнему необходимо перед снятием draft.
+
+## Исправление Host policies после проверки pve-firewall 6.0.6
+
+Проверка установленного pve-firewall 6.0.6, сообщённая пользователем, выявила
+дефект: `policy_in`/`policy_out` относятся к Datacenter/VM, а не Host.
+`enable_host_firewall()` использует cluster options. Поэтому прежний генератор
+не задавал обещанную host policy; parser diagnostics могли сопровождаться
+успешным выходом compiler. Прежнее утверждение «compile прошёл — кандидат
+корректен» отозвано.
+
+Исправлено:
+
+- В генерируемом Host OPTIONS остаётся только `enable: 1`.
+- Audit и Plan показывают политики Datacenter, явный источник либо отдельно
+  помеченное предположение о defaults 6.0.6. Defaults не считаются проверенным
+  эффективным состоянием. Противоречивые/отсутствующие явные политики блокируют
+  план; cluster config инструмент не меняет.
+- Общий quiet preflight для Apply и `validate-candidate` отвергает любой
+  непустой stdout/stderr, даже при exit 0. `__WARN__` устанавливается до import
+  PVE и перед parse; перехваченные внутри PVE ошибки не обходят проверку вывода.
+- Наличие Host ACCEPT-правил не доказывает ограничение доступа: Datacenter RULES,
+  security groups, management ipset и встроенные management/local_network
+  exceptions могут открывать путь раньше Host allowlist. Пока нет проверки
+  эффективных compiled правил, **native firewall Apply всегда заблокирован**.
+  Ручного флага обхода нет. Конфигурации и генерация кандидата доступны для ревью.
+- Добавлена read-only команда `validate-candidate`; её успех явно возвращает
+  `management_access_verified: false`. Инструкция в `proxmox-host.md`.
+
+Проверки после исправления: **139/139 OK** от root в отдельном одноразовом
+Debian 13 контейнере, без пропусков. Proxmox tests: **33/33 OK**. Шесть новых
+регрессий проверяют Host options, Datacenter policy sources/defaults/duplicates,
+нулевой exit с parser diagnostics, отсутствие timer/write после такого отказа
+и блокировку непроверенных management exceptions/Datacenter ACCEPT/IPSET.
+Bash syntax и Python compilation также прошли.
+
+Повторный запуск candidate preflight на `hilocaladmin` здесь **NOT RUN**:
+подключение к нему не использовалось. Реальное подтверждение отсутствия обходов
+allowlist и сетевой доступности по-прежнему **NOT RUN**. Черновой статус PR и
+запрет production rollout остаются в силе; эти пункты не выдаются за закрытые.
