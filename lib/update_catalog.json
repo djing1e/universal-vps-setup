@@ -1,13 +1,14 @@
 {
   "schema_version": 1,
-  "target_revision": "ea1ad2c5dd175e02e335b6d0805d8cc16428a655",
+  "target_revision": "df0124973ee0e30dd40aa85559b25d6328310878",
   "components": {
     "tcp-c2": {
       "path": "/usr/local/sbin/xtls-c2-feed",
       "source": "modules/xtls-c2-feed.sh",
-      "target_sha256": "1c1aa5912fa87a867da6a606c0584b31a250c6362fb1c27105e49291e0076939",
+      "target_sha256": "c0fbc6de6c6ca44e2382a621411cd75a3c55e3f25967783706070a0b22750b73",
       "known_previous_sha256": [
-        "b95524e606d3876cee4cd88565705e492c8918fc9b08c1e649b298cf307e1f5e"
+        "b95524e606d3876cee4cd88565705e492c8918fc9b08c1e649b298cf307e1f5e",
+        "1c1aa5912fa87a867da6a606c0584b31a250c6362fb1c27105e49291e0076939"
       ],
       "units": [
         "xtls-c2-feed-restore.service",
@@ -27,11 +28,12 @@
     "spamhaus-output": {
       "path": "/usr/local/sbin/xtls-spamhaus-output",
       "source": "modules/xtls-spamhaus-output.sh",
-      "target_sha256": "5adc3759693949320b108e8e98ae59029aed810e826554589271dd59e9b1521d",
+      "target_sha256": "1ef199aafa14370726711af47b3dabd9248ce5beec6e4bbbb69dd7c999ca0a1e",
       "known_previous_sha256": [
         "eeb1b4dc7943fa7dc5f411a6fc404f37b4104daedafff4b00d9262361efbb75a",
         "f69d2bb5c7ebce0905bdcd5d0e55823b1f08f36213c631ae48e88a8963db2777",
-        "c7093bfbb75bb31d0654b44694a2470917063939d32581e6082251e70a57d18f"
+        "c7093bfbb75bb31d0654b44694a2470917063939d32581e6082251e70a57d18f",
+        "5adc3759693949320b108e8e98ae59029aed810e826554589271dd59e9b1521d"
       ],
       "units": [
         "xtls-spamhaus-output-restore.service",
@@ -51,9 +53,10 @@
     "auto-abuse-guard": {
       "path": "/usr/local/sbin/xtls-auto-abuse-guard",
       "source": "modules/xtls-auto-abuse-guard.py",
-      "target_sha256": "f9eb32909626917a708a66907df0debf7cfc1943e626e7974e03e697996bcd03",
+      "target_sha256": "5524c098c4270247bf3779b154a628c959fa4fb59ebfac63ce7e37eff154eea6",
       "known_previous_sha256": [
-        "5087d1621ce2709192c67cbf949fc51cf4e98b6b35fa697ee28b05ddcf8ff745"
+        "5087d1621ce2709192c67cbf949fc51cf4e98b6b35fa697ee28b05ddcf8ff745",
+        "f9eb32909626917a708a66907df0debf7cfc1943e626e7974e03e697996bcd03"
       ],
       "units": [
         "xtls-auto-abuse-guard.service",
@@ -64,8 +67,10 @@
     "spamhaus-udp": {
       "path": "/usr/local/sbin/xtls-spamhaus-udp",
       "source": "modules/xtls-spamhaus-udp.py",
-      "target_sha256": "3a9a538570385684e01514cb38f48937870780dae7f593983b3f6b6b55479f5a",
-      "known_previous_sha256": [],
+      "target_sha256": "b8ac3086a10081096777f5df52e027d6d97c3efd84024198fd4cf94859ea48c3",
+      "known_previous_sha256": [
+        "3a9a538570385684e01514cb38f48937870780dae7f593983b3f6b6b55479f5a"
+      ],
       "units": [
         "xtls-spamhaus-udp-restore.service",
         "xtls-spamhaus-output-restore.service",

@@ -30,14 +30,13 @@ jobs:
       - name: Validate Bash syntax
         shell: bash
         run: |
-          bash -n vps-setup.sh
-          bash -n modules/xtls-c2-feed.sh
+          for f in vps-setup.sh modules/*.sh; do bash -n "$f" || exit; done
           echo 'Bash syntax OK'
       - name: Auto Abuse Guard syntax and regression tests
         shell: bash
         run: |
           bash -n modules/xtls-auto-abuse-guard-install.sh
-          python3 -m py_compile modules/xtls-auto-abuse-guard.py modules/xtls-spamhaus-udp.py
+          python3 -m py_compile lib/*.py modules/*.py
           sudo python3 -m unittest discover -s tests -v
       - name: Real nftables conntrack direction and migration
         shell: bash
