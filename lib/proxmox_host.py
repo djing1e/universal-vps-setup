@@ -385,26 +385,34 @@ def apply(plan, args, root=Path('/'), runner=probe):
                 if op == 'firewall' and fingerprint(read_file(root/'etc/pve/firewall/cluster.fw')) != plan['cluster_sha256']:
                     raise ValueError('cluster configuration changed since plan')
                 atomic_write(destination, plan['content'].encode())
-            if op == 'firewall':
-                run(['pve-firewall', 'compile'])
-                run(['systemctl', 'restart', 'pve-firewall.service'])
-                run(['pve-firewall', 'status'])
-            elif op == 'ssh':
-                run(['sshd', '-t'])
-                effective = run(['sshd', '-T'])
-                validate_ssh_effective(effective)
-                run(['systemctl', 'reload', 'ssh.service'])
-            elif op == 'fail2ban':
-                run(['fail2ban-client', '-t'])
-                check_fail2ban_dump()
-                run(['systemctl', 'restart', 'fail2ban.service'])
-            elif op == 'crowdsec-observe':
-                run(['systemctl', 'start', 'crowdsec.service'])
+        if op == 'firewall':
+            run(['pve-firewall', 'compile'])
+            run(['systemctl', 'restart', 'pve-firewall.service'])
+            run(['pve-firewall', 'status'])
+        elif op == 'ssh':
+            run(['sshd', '-t'])
+            effective = run(['sshd', '-T'])
+            validate_ssh_effective(effective)
+            run(['systemctl', 'reload', 'ssh.service'])
+        elif op == 'fail2ban':
+            run(['fail2ban-client', '-t'])
+            check_fail2ban_dump()
+            run(['systemctl', 'restart', 'fail2ban.service'])
+        elif op == 'crowdsec-observe':
+            run(['systemctl', 'start', 'crowdsec.service'])
+        # Never hold the transaction lock while waiting for systemd/sshd/PVE.
+        # The independent watchdog must be able to restore files during a hang.
+        with (transaction/'lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if time.time() >= state['deadline'] or (transaction/'rolled-back').exists():
+                raise ValueError('Apply expired or rolled back during service verification')
+            (transaction/'applied').touch()
     except BaseException:
         rollback(transaction)
         raise
     return {'status': 'pending_verification', 'transaction': str(transaction),
             'changes_applied': True, 'rollback_seconds': args.rollback_seconds,
+            'verification': 'manual_attestation_required_not_automatic_access_check',
             'next': 'Verify NEW SSH key login and IPv4/IPv6 UI access from allowed sources, '
                     'and guest connectivity from another session, then commit before timeout.'}
 
@@ -415,6 +423,8 @@ def commit(transaction, verified):
     with (transaction/'lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         state = json.loads((transaction/'state.json').read_text())
+        if not (transaction/'applied').exists():
+            raise ValueError('Apply has not completed; manual attestation cannot commit it')
         if (transaction/'rolled-back').exists() or time.time() >= state['deadline']:
             raise ValueError('transaction expired; audit again')
         (transaction/'committed').touch()

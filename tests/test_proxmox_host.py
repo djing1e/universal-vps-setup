@@ -252,6 +252,40 @@ class ProxmoxTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, name)
             self.assertNotIn('MUTATED', result.stdout)
 
+    def test_independent_process_can_rollback_during_restart(self):
+        def run(argv):
+            if argv == ['systemctl', 'restart', 'pve-firewall.service']:
+                txn = next((self.root/'var/lib/proxmox-host').iterdir())
+                # A real second process takes the real flock and restores files.
+                code = "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import proxmox_host as h; h.run=lambda argv: ''; h.rollback(Path(sys.argv[2]))"
+                subprocess.run([sys.executable, '-c', code, str(ROOT/'lib'), str(txn)],
+                               check=True, timeout=5, capture_output=True)
+            return ''
+        with patch.object(host, 'run', side_effect=run):
+            with self.assertRaisesRegex(ValueError, 'rolled back'):
+                self.apply(self.plan())
+        self.assertFalse((self.root/'etc/pve/nodes/testnode/host.fw').exists())
+
+    def test_expiry_during_service_checks_rejects_apply(self):
+        def run(argv):
+            if argv == ['systemctl', 'restart', 'pve-firewall.service']:
+                txn = next((self.root/'var/lib/proxmox-host').iterdir())
+                state = json.loads((txn/'state.json').read_text())
+                # Use a future clock for the final deadline check, not timer mocks.
+                clock.return_value = state['deadline'] + 1
+            return ''
+        with patch.object(host.time, 'time', return_value=time.time()) as clock, patch.object(host, 'run', side_effect=run):
+            with self.assertRaisesRegex(ValueError, 'expired'):
+                self.apply(self.plan())
+        self.assertFalse((self.root/'etc/pve/nodes/testnode/host.fw').exists())
+
+    def test_commit_cannot_attest_before_apply_completed(self):
+        with patch.object(host, 'run', return_value=''):
+            result = self.apply(self.plan())
+        txn = Path(result['transaction']); (txn/'applied').unlink()
+        with self.assertRaisesRegex(ValueError, 'not completed'):
+            host.commit(txn, 'VERIFIED SSH UI IPV4 IPV6 AND GUESTS')
+
     def test_ssh_effective_uses_exact_lines_and_accepts_openssh_alias(self):
         good = 'passwordauthentication no\nkbdinteractiveauthentication no\npubkeyauthentication yes\npermitrootlogin without-password'
         host.validate_ssh_effective(good)
