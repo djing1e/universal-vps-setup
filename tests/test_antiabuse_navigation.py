@@ -66,6 +66,25 @@ spamhaus_output_summary() { echo summary >> "$NAV_CALLS"; }
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertFalse(list(self.root.glob('feed.*')))
 
+    def test_overall_status_reads_portscan_chain_without_dynamic_set_dump(self):
+        self.tool('ipset', 'exit 1')
+        self.tool('iptables', 'exit 1')
+        self.tool('ip6tables', 'exit 1')
+        self.tool('systemctl', 'exit 0')
+        self.tool('nft', 'echo chain-summary')
+        portscan = self.root / 'xtls-portscan-observe'
+        portscan.write_text('#!/bin/bash\nexit 99\n')
+        portscan.chmod(0o755)
+        source = 'antiabuse_center_status() {' + SOURCE.split('antiabuse_center_status() {', 1)[1].split(
+            '# =====================================', 1)[0]
+        source = source.replace('/usr/local/sbin/', str(self.root)+'/')
+        source += '\nspamhaus_output_summary() { :; }\n'
+        r = self.run_menu(source, 'antiabuse_center_status', '')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        nft_calls = [line for line in self.calls.read_text().splitlines() if line.startswith('nft ')]
+        self.assertEqual(nft_calls, ['nft -a list chain inet xtls_portscan_observe out'])
+        self.assertIn('chain-summary', r.stdout)
+
     def guard_source(self):
         self.tool('curl', 'printf "#!/bin/bash\\n" > "${@: -1}"')
         self.tool('systemctl', '[[ -z "${FAIL_START:-}" || "$1" != start ]]')

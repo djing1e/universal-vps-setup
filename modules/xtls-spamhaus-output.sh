@@ -7,13 +7,39 @@ LOCK=/run/xtls-spamhaus-output.lock
 URL4=https://www.spamhaus.org/drop/drop_v4.json
 URL6=https://www.spamhaus.org/drop/drop_v6.json
 
+# Keep the oldest counter for each exact owned marker. Duplicates count the
+# same packet, so summing them would inflate telemetry. Never replace DROP/logs.
+ensure_counters() (
+  local d
+  d=$(mktemp -d /tmp/xtls-spamhaus-counters.XXXXXXXX)
+  trap 'rm -rf "$d"' EXIT
+  nft -j -a list chain inet "$TABLE" output > "$d/chain.json"
+  python3 - "$d/chain.json" > "$d/batch" <<'PY_COUNTERS'
+import json,sys
+rows=[item['rule'] for item in json.load(open(sys.argv[1]))['nftables'] if 'rule' in item]
+for version in (4,6):
+    marker=f'xtls-sh-out-v{version}'
+    owned=[row for row in rows if row.get('comment')==marker]
+    if not owned:
+        family='ip' if version==4 else 'ip6'
+        print(f'add rule inet xtls_spamhaus_out output {family} daddr @v{version} counter comment "{marker}"')
+    for row in owned[1:]:
+        handle=row['handle']
+        if type(handle) is not int or handle<0: raise ValueError('Invalid nft rule handle')
+        print(f'delete rule inet xtls_spamhaus_out output handle {handle}')
+PY_COUNTERS
+  if [[ -s "$d/batch" ]]; then
+    nft -c -f "$d/batch"
+    nft -f "$d/batch"
+  fi
+)
+
 prepare() {
   nft list table inet "$TABLE" >/dev/null 2>&1 || nft add table inet "$TABLE"
   nft list set inet "$TABLE" v4 >/dev/null 2>&1 || nft 'add set inet xtls_spamhaus_out v4 { type ipv4_addr; flags interval; auto-merge; }'
   nft list set inet "$TABLE" v6 >/dev/null 2>&1 || nft 'add set inet xtls_spamhaus_out v6 { type ipv6_addr; flags interval; auto-merge; }'
   nft list chain inet "$TABLE" output >/dev/null 2>&1 || nft 'add chain inet xtls_spamhaus_out output { type filter hook output priority -18; policy accept; }'
-  nft list chain inet "$TABLE" output | grep -q 'xtls-sh-out-v4' || nft add rule inet "$TABLE" output ip daddr @v4 counter comment '"xtls-sh-out-v4"'
-  nft list chain inet "$TABLE" output | grep -q 'xtls-sh-out-v6' || nft add rule inet "$TABLE" output ip6 daddr @v6 counter comment '"xtls-sh-out-v6"'
+  ensure_counters
 }
 update() (
   install -d -m 700 "$ROOT"
