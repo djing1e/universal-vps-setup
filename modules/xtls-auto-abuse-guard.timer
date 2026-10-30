@@ -1,0 +1,13 @@
+[Unit]
+Description=Run xtls Auto Abuse Guard observe scan every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=1min
+AccuracySec=15s
+RandomizedDelaySec=5s
+Persistent=false
+Unit=xtls-auto-abuse-guard.service
+
+[Install]
+WantedBy=timers.target

@@ -26,6 +26,9 @@ class GuardMenuTests(unittest.TestCase):
         self.source=self.source.replace(
             'a182c62db4cd8fd6f6e364d992d468ce2a2647724acf0e7444de41c205824ed9',
             hashlib.sha256((ROOT/'lib/vps_inventory.py').read_bytes()).hexdigest())
+        self.source=self.source.replace(
+            '2b446ae307a76b87f18f577919841779981c6f131d73bec47b9aa2f4aa25726d',
+            hashlib.sha256((ROOT/'lib/guard_engine_upgrade.py').read_bytes()).hexdigest())
         self.tool('curl', '''from pathlib import Path
 if os.environ.get('FAIL_DOWNLOAD'): sys.exit(22)
 url=sys.argv[-3];name=url.split('/')[-1]

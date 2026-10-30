@@ -74,7 +74,7 @@ def load_catalog():
     return unique_json(CATALOG.read_text())
 
 
-def inspect(root=Path('/'), catalog=None):
+def inspect(root=Path('/'), catalog=None, receipt_path=None):
     release = validate_catalog(load_catalog() if catalog is None else catalog)
     resources = {}
     for name,spec in release['resources'].items():
@@ -91,7 +91,7 @@ def inspect(root=Path('/'), catalog=None):
               'detected_version':release['version'] if recognized else None,
               'ownership':'not_established','resources':resources,
               'changes_applied':False,'automatic_update':False}
-    path = root/RECEIPT.lstrip('/')
+    path = receipt_path if receipt_path is not None else root/RECEIPT.lstrip('/')
     try:
         raw, metadata = read_regular(path,16384)
         if metadata['mode']!=0o600: raise ValueError('unsafe_receipt_mode')
@@ -104,7 +104,7 @@ def inspect(root=Path('/'), catalog=None):
         if not isinstance(receipt,dict) or set(receipt)!=expected_keys or type(receipt['schema_version']) is not int or receipt['schema_version']!=1:
             raise ValueError('invalid_receipt_schema')
         if (receipt['component']!=COMPONENT or receipt['version']!=release['version'] or
-                receipt['source_revision']!=release['source_revision'] or receipt['provenance']!='explicit_adoption'):
+                receipt['source_revision']!=release['source_revision'] or receipt['provenance'] not in ('explicit_adoption','managed_install','managed_update')):
             raise ValueError('unrecognized_receipt_release')
         timestamp = dt.datetime.fromisoformat(receipt['registered_at'])
         if timestamp.tzinfo is None: raise ValueError('receipt_time_requires_timezone')
@@ -191,6 +191,83 @@ def adopt(root=Path('/'),catalog=None,runner=None):
         if updated['status']!='registered_matches': raise ValueError('registration_verification_failed')
         updated['changes_applied']=True
         return updated
+
+
+class Registration:
+    """Receipt operations for a caller holding the shared installer lock."""
+    def __init__(self, root=Path('/'), catalog=None, receipt_path=None):
+        self.root = root
+        self.catalog = load_catalog() if catalog is None else catalog
+        self.release = validate_catalog(self.catalog)
+        self.path = receipt_path if receipt_path is not None else root/RECEIPT.lstrip('/')
+
+    def current(self):
+        try:
+            raw, metadata = read_regular(self.path,16384)
+            if metadata['mode']!=0o600: raise ValueError('unsafe_receipt_mode')
+            return raw
+        except FileNotFoundError:
+            return None
+
+    def validate_storage(self):
+        for directory in (self.path.parent.parent,self.path.parent):
+            if directory.is_symlink(): raise ValueError('registry_symlink_requires_review')
+            if directory.exists():
+                info=directory.stat()
+                if info.st_uid!=0 or info.st_gid!=0 or stat.S_IMODE(info.st_mode)!=0o700:
+                    raise ValueError('unsafe_registry_directory')
+
+    def snapshot(self):
+        self.validate_storage()
+        raw = self.current()
+        if raw is not None and inspect(self.root,self.catalog,self.path)['status']!='registered_matches':
+            raise ValueError('registered_resources_require_review')
+        return raw
+
+    def prepare(self, provenance):
+        if provenance not in ('managed_install','managed_update'): raise ValueError('invalid_provenance')
+        state = inspect(self.root,self.catalog,self.path)
+        if not all(item['status']=='matches_release' for item in state['resources'].values()):
+            raise ValueError('target_resources_do_not_match_registry_release')
+        return json.dumps({'schema_version':1,'component':COMPONENT,'version':self.release['version'],
+                           'source_revision':self.release['source_revision'],'provenance':provenance,
+                           'registered_at':dt.datetime.now(dt.timezone.utc).isoformat(),
+                           'resources':{name:{k:v for k,v in item.items() if k!='status'}
+                                        for name,item in state['resources'].items()}},indent=2).encode()+b'\n'
+
+    def replace(self, expected, new):
+        # Validate the current raw bytes and metadata, but do not reinterpret the
+        # old receipt against files already changed by the enclosing transaction.
+        if self.current()!=expected: raise ValueError('receipt_changed_externally')
+        for directory in (self.path.parent.parent,self.path.parent):
+            if directory.is_symlink(): raise ValueError('registry_symlink_requires_review')
+            directory.mkdir(mode=0o700,exist_ok=True)
+            info=directory.stat()
+            if info.st_uid!=0 or info.st_gid!=0 or stat.S_IMODE(info.st_mode)!=0o700:
+                raise ValueError('unsafe_registry_directory')
+        if new is None:
+            if expected is not None: self.path.unlink()
+        else:
+            fd,temporary=tempfile.mkstemp(prefix='.lifecycle-',dir=self.path.parent)
+            try:
+                with os.fdopen(fd,'wb') as stream:
+                    os.fchown(stream.fileno(),0,0);os.fchmod(stream.fileno(),0o600)
+                    stream.write(new);stream.flush();os.fsync(stream.fileno())
+                if expected is None:
+                    os.link(temporary,self.path,follow_symlinks=False)
+                else:
+                    os.replace(temporary,self.path)
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+        fd=os.open(self.path.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try: os.fsync(fd)
+        finally: os.close(fd)
+
+    def restore(self, before, attempted):
+        current=self.current()
+        if current==before: return
+        if attempted is None or current!=attempted: raise ValueError('receipt_changed_externally')
+        self.replace(attempted,before)
 
 
 def main():

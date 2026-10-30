@@ -13,6 +13,7 @@ import tempfile
 import uuid
 
 from vps_inventory import probe, os_identity
+from module_registry import Registration
 
 POLICY = Path(__file__).with_name('guard_engine_policy.json')
 ENGINE = '/usr/local/sbin/xtls-auto-abuse-guard'
@@ -63,8 +64,9 @@ def atomic_write(path, raw, mode):
 
 
 class Upgrade:
-    def __init__(self, policy, root=Path('/'), runner=probe):
+    def __init__(self, policy, root=Path('/'), runner=probe, registration=None):
         self.policy, self.root, self.runner = policy, root, runner
+        self.registration = registration if registration is not None else Registration(root)
         self.engine = root/ENGINE.lstrip('/')
         self.backups = root/'var/lib/xtls-safe-upgrade'
         self.lock = root/'run/xtls-auto-abuse-guard-install.lock'
@@ -113,11 +115,15 @@ class Upgrade:
             if digest(data) != expected:
                 raise ValueError('custom/unknown unit file: '+name)
             unit_bytes[name] = data
+        if self.registration.release['resources'][ENGINE]['sha256']!=self.policy['target_sha256']:
+            raise ValueError('registry target and update policy disagree')
+        receipt = self.registration.snapshot()
         states = {name:self.state(name) for name in (SERVICE,TIMER)}
         return {'component':'auto-abuse-guard', 'changes_applied':False,
                 'status':'noop' if current_hash == self.policy['target_sha256'] else 'ready_for_explicit_apply',
                 'current_sha256':current_hash, 'target_sha256':self.policy['target_sha256'],
                 'target_revision':self.policy['target_revision'],
+                'registry_state':'registered_matches' if receipt is not None else 'unregistered',
                 'timer_active':states[TIMER]['ActiveState']=='active',
                 'timer_enabled':states[TIMER]['UnitFileState'],
                 'verification':'service_scan' if states[TIMER]['ActiveState']=='active' else 'static_only'}, raw, current, unit_bytes
@@ -181,6 +187,7 @@ class Upgrade:
         with self.locked():
             self.unresolved()
             report, raw, old, units = self.check(candidate)
+            old_receipt = self.registration.snapshot()
             if report['status'] == 'noop':
                 return report
             # Back up before stopping anything. Never overwrite unit files or history.
@@ -190,14 +197,16 @@ class Upgrade:
             directory = self.backups/(datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')+'-'+uuid.uuid4().hex)
             directory.mkdir(mode=0o700)
             atomic_write(directory/'engine', old, 0o700)
+            if old_receipt is not None: atomic_write(directory/'registry-before.json', old_receipt, 0o600)
             for name,data in units.items():
                 atomic_write(directory/name, data, 0o600)
-            record = dict(report, status='pending')
+            record = dict(report, status='pending', registry_before_present=old_receipt is not None)
             def save(status):
                 record['status'] = status
                 atomic_write(directory/'transaction.json', json.dumps(record,indent=2).encode()+b'\n', 0o600)
             save('pending')
             replaced = False
+            new_receipt = None
             try:
                 self.command('stop', TIMER)
                 self.command('stop', SERVICE)
@@ -214,6 +223,9 @@ class Upgrade:
                 if report['timer_active']:
                     self.command('start', TIMER)
                 self.verify_timer(report)
+                new_receipt = self.registration.prepare('managed_update')
+                self.registration.replace(old_receipt,new_receipt)
+                if self.registration.snapshot()!=new_receipt: raise RuntimeError('registry verification failed')
                 save('committed')
                 return dict(report, status='updated', changes_applied=True, backup=str(directory))
             except Exception as failure:
@@ -229,6 +241,7 @@ class Upgrade:
                             raise ValueError('engine changed externally; refusing blind rollback')
                     if read_regular(self.engine)[0] != old:
                         raise RuntimeError('old engine not restored')
+                    self.registration.restore(old_receipt,new_receipt)
                     if report['timer_active']:
                         if replaced:
                             self.verify_scan()
