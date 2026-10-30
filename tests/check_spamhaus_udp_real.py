@@ -27,6 +27,10 @@ for v,kind,address in [(4,'ipv4_addr','127.0.0.1'),(6,'ipv6_addr','::1')]:
     nft(f'add set inet xtls_spamhaus_out v{v} {{ type {kind}; flags interval; elements = {{ {address} }}; }}')
 nft('add chain inet xtls_spamhaus_out output { type filter hook output priority -18; policy accept; }')
 nft('add rule inet xtls_spamhaus_out output counter comment "preserve-counter"')
+# Enable namespace conntrack hooks before warming UDP flows. Otherwise the
+# initial packets in an empty namespace may be untracked and the later reply
+# correctly becomes the first/original packet of a newly tracked connection.
+nft('add rule inet xtls_spamhaus_out output ct state new,established counter comment "conntrack-fixture"')
 with tempfile.TemporaryDirectory() as directory:
     root=Path(directory)
     (root/'exemptions.txt').write_text('# explicitly reviewed empty fixture\n')
