@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        exit 1
+    fi
 set -Eeuo pipefail
 # Optional outbound SMTP/25 abuse guard. Observe by default. Never touches other tables.
 TABLE=xtls_smtp25_guard

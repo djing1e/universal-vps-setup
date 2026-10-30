@@ -23,6 +23,21 @@ MAX_FLOW_KEYS = 4096
 EVENT_RE = re.compile(r"\bSRC=(\S+).*?\bDST=(\S+).*?\bPROTO=(TCP|UDP)\b.*?\bSPT=(\d+)\b.*?\bDPT=(\d+)\b")
 ACCESS_RE = re.compile(r"^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d)\.\d+ .*? accepted (tcp|udp):(\S+) \[([^]]+)\] email: (\S+)")
 
+def _require_vps_host():
+    import os as _os
+    import subprocess as _subprocess
+    from pathlib import Path as _Path
+    _pve = _Path('/etc/pve').exists() or _Path('/usr/bin/pveversion').exists() or _os.uname().release.endswith('-pve')
+    try:
+        _pkg = _subprocess.run(['dpkg-query', '-W', '-f=${Status}', 'pve-manager'],
+                               capture_output=True, timeout=3, text=True)
+        _pve = _pve or (_pkg.returncode == 0 and _pkg.stdout == 'install ok installed')
+    except (OSError, _subprocess.TimeoutExpired):
+        raise SystemExit('Host detection unavailable; refusing node module')
+    if _pve:
+        raise SystemExit('BLOCKED: node module is not allowed on Proxmox Host')
+
+
 def canonical_address(value):
     """Normalize numeric addresses locally; never resolve access-log domains."""
     try:
@@ -87,6 +102,7 @@ def get_events(cursor):
     return events
 
 def scan():
+    _require_vps_host()
     STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
     with (STATE / "lock").open("a") as lock:
         try:
@@ -179,6 +195,7 @@ def scan():
 
 
 def record_behavior_incidents(results, now):
+    _require_vps_host()
     """Persist bounded, deduplicated signals; never modify subscribers or firewall."""
     STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
     file = STATE / "behavior-incidents.json"
@@ -261,6 +278,7 @@ def record_behavior_incidents(results, now):
 
 
 def behavior_history():
+    _require_vps_host()
     file = STATE / "behavior-incidents.json"
     if not file.exists():
         print("[]")
@@ -271,6 +289,7 @@ def behavior_history():
 
 
 def behavior(record=False):
+    _require_vps_host()
     """Bounded subscription-level heuristics from Xray access logs; observation only."""
     from collections import defaultdict
     import ipaddress
@@ -423,6 +442,7 @@ def behavior(record=False):
     }, ensure_ascii=False, separators=(",", ":")))
 
 def report():
+    _require_vps_host()
     file = STATE / "detections.jsonl"
     if not file.exists():
         print("No recorded events")
@@ -437,6 +457,8 @@ def report():
             print(line)
 
 if __name__ == "__main__":
+    _require_vps_host()
+
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("action", choices=["scan", "report", "behavior", "behavior-record", "behavior-history"])
     args = p.parse_args()

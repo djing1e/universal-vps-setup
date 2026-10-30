@@ -14,6 +14,21 @@ TABLE = 'xtls_spamhaus_out'
 MARKERS = {f'xtls-sh-udp-drop-v{v}' for v in (4, 6)}
 
 
+def _require_vps_host():
+    import os as _os
+    import subprocess as _subprocess
+    from pathlib import Path as _Path
+    _pve = _Path('/etc/pve').exists() or _Path('/usr/bin/pveversion').exists() or _os.uname().release.endswith('-pve')
+    try:
+        _pkg = _subprocess.run(['dpkg-query', '-W', '-f=${Status}', 'pve-manager'],
+                               capture_output=True, timeout=3, text=True)
+        _pve = _pve or (_pkg.returncode == 0 and _pkg.stdout == 'install ok installed')
+    except (OSError, _subprocess.TimeoutExpired):
+        raise SystemExit('Host detection unavailable; refusing node module')
+    if _pve:
+        raise SystemExit('BLOCKED: node module is not allowed on Proxmox Host')
+
+
 def command(argv, batch=None):
     return subprocess.check_output(argv, input=batch, text=True, timeout=20)
 
@@ -25,6 +40,7 @@ class Guard:
 
     @contextlib.contextmanager
     def locked(self):
+        _require_vps_host()
         with self.lockfile.open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             yield
@@ -39,6 +55,7 @@ class Guard:
         return value
 
     def save_mode(self, mode):
+        _require_vps_host()
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd, name = tempfile.mkstemp(prefix='.mode-', dir=self.root)
         try:
@@ -83,6 +100,7 @@ class Guard:
                 raise ValueError(f'Spamhaus IPv{version} set absent, empty or wrong type')
 
     def apply(self, enabled):
+        _require_vps_host()
         nets = self.exemptions() if enabled else None
         if enabled:
             self.check_source_sets()
@@ -149,6 +167,7 @@ class Guard:
 
 
 def main():
+    _require_vps_host()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['enable-block','disable-block','restore','status'])
     args = parser.parse_args()
@@ -164,4 +183,6 @@ def main():
 
 
 if __name__ == '__main__':
+    _require_vps_host()
+
     main()
