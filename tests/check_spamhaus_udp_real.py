@@ -46,7 +46,12 @@ with tempfile.TemporaryDirectory() as directory:
         for af,address,server,client,peer in pairs:
             version=4 if af==socket.AF_INET else 6
             previous=packets()[f'xtls-sh-udp-drop-v{version}']
-            client.send(b'must-drop')
+            try:
+                client.send(b'must-drop')
+            except PermissionError:
+                # Linux may report a local OUTPUT DROP directly as EPERM.
+                # Still require receiver timeout AND the DROP counter increase.
+                pass
             try:
                 server.recvfrom(64)
                 raise AssertionError('original UDP was not dropped')
