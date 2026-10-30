@@ -272,6 +272,49 @@ class UpgradeTests(unittest.TestCase):
         self.assertTrue(all(c[1]=='show' for c in self.calls))
         self.assertFalse(self.guard.backups.exists())
 
+    def reset_result_runner(self, result):
+        original=self.guard.runner
+        def runner(argv, timeout):
+            if argv==['systemctl','reset-failed',upgrade.SERVICE]:
+                self.calls.append(argv)
+                return result
+            return original(argv, timeout)
+        self.guard.runner=runner
+
+    def test_unloaded_inactive_service_is_validated_then_started(self):
+        self.reset_result_runner({'status':'error','output':
+            'Failed to reset failed state of unit '+upgrade.SERVICE+': Unit '+upgrade.SERVICE+' not loaded.'})
+        self.guard.verify_scan()
+        self.assertEqual([call[1] for call in self.calls],['reset-failed','show','start','show'])
+        self.assertIn(upgrade.SERVICE, self.calls[1])
+
+    def test_reset_failure_other_than_exact_unloaded_unit_is_not_ignored(self):
+        for status, output in [('error','Access denied'),('timeout',''),('limited',''),
+                               ('error','Unit unrelated.service not loaded.')]:
+            self.calls.clear()
+            self.guard.runner=self.runner
+            self.reset_result_runner({'status':status,'output':output})
+            with self.assertRaises(RuntimeError): self.guard.verify_scan()
+            self.assertFalse(any(call[1]=='start' for call in self.calls))
+
+    def test_unloaded_diagnostic_does_not_bypass_unknown_or_active_unit(self):
+        self.reset_result_runner({'status':'error','output':'Unit '+upgrade.SERVICE+' not loaded.'})
+        self.states[upgrade.SERVICE]['ActiveState']='active'
+        with self.assertRaises(RuntimeError): self.guard.verify_scan()
+        self.states[upgrade.SERVICE]['ActiveState']='inactive'
+        self.states[upgrade.SERVICE]['DropInPaths']='/etc/local.conf'
+        with self.assertRaises(ValueError): self.guard.verify_scan()
+        self.assertFalse(any(call[1]=='start' for call in self.calls))
+
+    def test_real_unloaded_diagnostic_allows_rollback_and_timer_restore(self):
+        self.reset_result_runner({'status':'error','output':'Unit '+upgrade.SERVICE+' not loaded.'})
+        self.fail_scan=True
+        with self.assertRaisesRegex(RuntimeError,'old engine and timer restored'):
+            self.guard.apply(self.candidate)
+        self.assertEqual(self.engine.read_bytes(),self.old)
+        self.assertEqual(self.records()[0]['status'],'rolled_back')
+        self.assertEqual(self.states[upgrade.TIMER]['ActiveState'],'active')
+
     def test_policy_matches_release_engine_and_installer_units(self):
         policy=json.loads((ROOT/'lib/guard_engine_policy.json').read_text())
         source=(ROOT/'modules/xtls-auto-abuse-guard-install.sh').read_text()

@@ -125,7 +125,17 @@ class Upgrade:
     def verify_scan(self):
         # A failed candidate can exhaust systemd's start budget. Clear only this
         # observer's failure/start-limit before testing either engine.
-        self.command('reset-failed', SERVICE)
+        reset = self.runner(['systemctl','reset-failed',SERVICE], timeout=40)
+        if reset['status'] != 'ok':
+            # systemd may garbage-collect an inactive unit with no active timer.
+            # An unloaded unit has no start-rate state to clear. Accept only this
+            # exact diagnostic and revalidate the known inactive unit before start.
+            unloaded = (reset['status']=='error' and
+                        f'Unit {SERVICE} not loaded.' in reset.get('output',''))
+            if not unloaded:
+                raise RuntimeError('systemctl reset-failed failed ('+reset['status']+')')
+            if self.state(SERVICE)['ActiveState'] != 'inactive':
+                raise RuntimeError('reset-failed fallback requires known inactive unit')
         self.command('start', SERVICE)
         result = self.command('show','--no-pager',SERVICE,'--property=Result,ExecMainStatus')
         values = dict(line.split('=',1) for line in result.splitlines() if '=' in line)

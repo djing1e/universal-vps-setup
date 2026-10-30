@@ -86,3 +86,10 @@ engine's restart budget during rollback. The unit's configured rate limits are
 unchanged. Preflight still refuses an already failed service; check/noop do not
 reset failures or start anything. Repeated disposable-VM scans exposed this case
 through real systemd's "Start request repeated too quickly" diagnostic.
+
+An inactive unit may be garbage-collected after its timer is disabled. If reset-failed
+returns the exact C-locale "Unit xtls-auto-abuse-guard.service not loaded." diagnostic,
+verification revalidates the effective unit path/drop-ins/reload state and requires
+ActiveState=inactive before starting it. Other reset errors, timeouts, unknown units
+and active-unit mismatches remain failures. An unloaded unit has no remaining
+start-rate counter; the reset is not needed in that specific case.
