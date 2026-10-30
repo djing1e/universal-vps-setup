@@ -9894,40 +9894,72 @@ setup_spamhaus_out_observe() {
 }
 
 guard_engine_menu_action() (
-    local action=${1:-} work base status answer
-    case "$action" in check|apply) ;; *) echo 'Неизвестное действие обновления Guard'; return 1 ;; esac
+    local action=${1:-} work base status answer path tool phrase
+    case "$action" in check|apply|install) ;; *) echo 'Неизвестное действие Guard'; return 1 ;; esac
     umask 077
     command -v python3 >/dev/null || { echo 'Требуется Python 3'; return 1; }
     work=$(mktemp -d /tmp/xtls-guard-upgrade.XXXXXX) || return 1
     trap 'rm -rf "$work"' EXIT
-    base=https://raw.githubusercontent.com/djing1e/universal-vps-setup/6973b97f4a172aa99b87527af28ce92b57159f92
-    curl -fsSL --connect-timeout 10 --max-time 60 "$base/lib/guard_engine_upgrade.py" -o "$work/guard_engine_upgrade.py" || return 1
-    curl -fsSL --connect-timeout 10 --max-time 60 "$base/lib/guard_engine_policy.json" -o "$work/guard_engine_policy.json" || return 1
-    curl -fsSL --connect-timeout 10 --max-time 60 "$base/lib/vps_inventory.py" -o "$work/vps_inventory.py" || return 1
-    curl -fsSL --connect-timeout 10 --max-time 60 "$base/modules/xtls-auto-abuse-guard.py" -o "$work/candidate.py" || return 1
+    base=https://raw.githubusercontent.com/djing1e/universal-vps-setup/1bfa9263c4a673cfafeecd851401e54734c95c6a
+    for path in lib/guard_managed_install.py \
+        lib/guard_engine_upgrade.py \
+        lib/guard_engine_policy.json \
+        lib/module_registry.py \
+        lib/module_releases.json \
+        lib/vps_inventory.py \
+        modules/xtls-auto-abuse-guard.py \
+        modules/xtls-auto-abuse-guard.service \
+        modules/xtls-auto-abuse-guard.timer
+    do
+        curl -fsSL --connect-timeout 10 --max-time 60 "$base/$path" -o "$work/${path##*/}" || return 1
+    done
     printf '%s  %s\n' \
-        2b446ae307a76b87f18f577919841779981c6f131d73bec47b9aa2f4aa25726d "$work/guard_engine_upgrade.py" \
+        390d50760a7f9e9768ad3e7e588cdbcb19ad6fb10f626be2858d68689768577f "$work/guard_managed_install.py" \
+        c6e156e2ed158bc6d0e21a83b5b612efe9b7ef7a61426b0fa8c0cdb235e22b00 "$work/guard_engine_upgrade.py" \
         3f87a241f4f4aa5b309bc2354e9c22ec192772deffac4df083facb6c464ba5ec "$work/guard_engine_policy.json" \
-        a182c62db4cd8fd6f6e364d992d468ce2a2647724acf0e7444de41c205824ed9 "$work/vps_inventory.py" \
-        f9eb32909626917a708a66907df0debf7cfc1943e626e7974e03e697996bcd03 "$work/candidate.py" | sha256sum -c - || return 1
-    echo '===== ПРОВЕРКА ОБНОВЛЕНИЯ GUARD (без замены и запусков) ====='
-    PYTHONDONTWRITEBYTECODE=1 python3 "$work/guard_engine_upgrade.py" check --candidate "$work/candidate.py" > "$work/check.json" || return 1
+        367fb254d25e9da7451783ca95d0ff4a727cd2396647d92e3f7eabe1a893e0aa "$work/module_registry.py" \
+        dc23dd26be5a538acad254d57f7f943759377d4fd2f37a7e2badffa3d935b475 "$work/module_releases.json" \
+        6fde7af90a55a8c3399d534f3984dfadc20193e4532f64652eb0c67cd15029af "$work/vps_inventory.py" \
+        f9eb32909626917a708a66907df0debf7cfc1943e626e7974e03e697996bcd03 "$work/xtls-auto-abuse-guard.py" \
+        f89fff2d6b9803d06c57d6d0a153be7f10161445c380576c51f78c6e2e0d724f "$work/xtls-auto-abuse-guard.service" \
+        2ca974bd2f4a9b8991c29ecb34d65a9fa88c33350075b25d4d4c43f12f3db7f1 "$work/xtls-auto-abuse-guard.timer" | sha256sum -c - || return 1
+    echo '===== ПРОВЕРКА GUARD (без замены и запусков) ====='
+    if [[ "$action" == install ]]; then
+        tool=guard_managed_install.py
+        PYTHONDONTWRITEBYTECODE=1 python3 "$work/$tool" check --bundle "$work" > "$work/check.json" || return 1
+    else
+        tool=guard_engine_upgrade.py
+        PYTHONDONTWRITEBYTECODE=1 python3 "$work/$tool" check --candidate "$work/xtls-auto-abuse-guard.py" > "$work/check.json" || return 1
+    fi
     cat "$work/check.json"
     status=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$work/check.json") || return 1
-    case "$status" in
-        noop) echo 'Движок Guard уже актуален. Замена и перезапуск не требуются.'; return 0 ;;
-        ready_for_explicit_apply) ;;
-        *) echo 'Проверка не разрешила обновление'; return 1 ;;
+    case "$action:$status" in
+        *:noop) echo 'Guard уже актуален. Замена и перезапуск не требуются.'; return 0 ;;
+        check:ready_for_explicit_apply|apply:ready_for_explicit_apply|install:ready_fresh_install|install:ready_register_existing) ;;
+        *) echo 'Проверка не разрешила действие'; return 1 ;;
     esac
     if [[ "$action" == check ]]; then
         echo 'Доступно обновление движка. Для применения выберите пункт 6.'
         return 0
     fi
-    echo 'Будет обновлён только движок Guard с резервной копией и откатом при ошибке.'
-    echo 'Активный Guard временно остановится для замены и проверки. Неактивный останется неактивным.'
-    read -e -r -p 'Для обновления введите UPDATE-GUARD-ENGINE: ' answer || return 0
-    [[ "$answer" == UPDATE-GUARD-ENGINE ]] || { echo 'Обновление отменено'; return 0; }
-    PYTHONDONTWRITEBYTECODE=1 python3 "$work/guard_engine_upgrade.py" apply --candidate "$work/candidate.py" --confirm UPDATE-GUARD-ENGINE || return 1
+    if [[ "$action" == install ]]; then
+        phrase=INSTALL-GUARD-OBSERVE
+        if [[ "$status" == ready_register_existing ]]; then
+            echo 'Будет записана только регистрация текущего Guard. Состояние служб сохраняется.'
+        else
+            echo 'Будет установлен Guard Observe, включён таймер и записана версия модуля.'
+        fi
+    else
+        phrase=UPDATE-GUARD-ENGINE
+        echo 'Будет обновлён движок Guard с резервной копией, проверкой и откатом файлов и реестра.'
+    fi
+    read -e -r -p "Для продолжения введите $phrase: " answer || return 0
+    [[ "$answer" == "$phrase" ]] || { echo 'Действие отменено'; return 0; }
+    if [[ "$action" == install ]]; then
+        PYTHONDONTWRITEBYTECODE=1 python3 "$work/$tool" install --bundle "$work" --confirm "$phrase" || return 1
+    else
+        PYTHONDONTWRITEBYTECODE=1 python3 "$work/$tool" apply --candidate "$work/xtls-auto-abuse-guard.py" --confirm "$phrase" || return 1
+    fi
 )
 
 setup_auto_abuse_guard() {
@@ -9942,7 +9974,7 @@ setup_auto_abuse_guard() {
     if ! bash -n "$installer"; then rm -f "$installer"; return 1; fi
     while true; do
         echo "=== Auto Abuse Guard (только Observe, без блокировок) ==="
-        echo "1) Установить / включить таймер"
+        echo "1) Установить Observe / зарегистрировать текущую установку"
         echo "2) Статус / последние наблюдения"
         echo "3) Проверить сейчас: Spamhaus + поведение подписок"
         echo "4) Отключить и удалить сервис (логи сохранить)"
@@ -9951,7 +9983,7 @@ setup_auto_abuse_guard() {
         echo "0) Назад"
         read -e -r -p "Выбор: " choice || break
         case "$choice" in
-            1) bash "$installer" install ;;
+            1) guard_engine_menu_action install || echo "Установка/регистрация не завершена; проверьте результат отката." ;;
             2) bash "$installer" status ;;
             3) if [[ -x /usr/local/sbin/xtls-auto-abuse-guard ]]; then
                    if systemctl start xtls-auto-abuse-guard.service; then

@@ -2,7 +2,7 @@
 
 This stage records the release and a narrowly defined resource set for Auto Abuse
 Guard only. It does not install/update modules, edit units/configuration, start
-services or enable timers. The main menu, installer and engine updater are unchanged.
+services or enable timers. The managed install/update integration is described in docs/guard-managed-lifecycle.md; standalone inspect/adopt keep their existing behavior.
 
 module_releases.json assigns version **1.0.0-rc.1** to the pinned existing Guard
 executable and its two exact unit templates. This is the first registry release

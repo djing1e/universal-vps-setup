@@ -51,3 +51,16 @@ The real-systemd update fixture uses its own private test receipt, not the host'
 registration. It verifies that the host's original receipt remains unchanged.
 Real fresh-install systemd validation is a separate test before release; ordinary
 checks on an already registered host intentionally return noop.
+
+
+## Menu
+
+16 -> 6 -> 1 uses the managed installer, not the compatibility Bash installer.
+It first checks and requires INSTALL-GUARD-OBSERVE only for a fresh installation
+or metadata-only registration. Items 5/6 use the registry-aware engine updater.
+The nine-file bundle (installer, updater, policy, registry/catalog, inventory helper,
+engine and two unit artifacts) is pinned to one reviewed commit and all hashes
+are checked before Python execution. Already current registered installations
+return noop for install/check/update, without confirmation or service controls.
+Old pinned bundles remain immutable; old registry readers can conservatively
+report newer managed provenance as unknown and should be replaced by the new bundle.
