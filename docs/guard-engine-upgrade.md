@@ -93,3 +93,20 @@ verification revalidates the effective unit path/drop-ins/reload state and requi
 ActiveState=inactive before starting it. Other reset errors, timeouts, unknown units
 and active-unit mismatches remain failures. An unloaded unit has no remaining
 start-rate counter; the reset is not needed in that specific case.
+
+
+## Menu integration
+
+In 16 -> 6 (Auto Abuse Guard), item 5 checks engine updates and item 6 checks,
+then offers an explicit UPDATE-GUARD-ENGINE confirmation only for a recognized
+older engine. Both return early on noop without confirmation, backup or service
+stops. Declining or EOF cancels the update. Errors return to the Guard menu.
+The existing install/remove/status/scan items retain their numbers.
+
+The wrapper stages the updater, policy, inventory helper and engine candidate
+from an immutable reviewed commit, verifies all four SHA256 hashes before executing
+any Python code, and cleans the private temporary bundle on exit. The apply command
+revalidates current state under its lock after confirmation. It does not use the
+previous check JSON as authority. The main menu does not run the disposable-VM
+fixture or modify release policy. A displayed verification=service_scan describes
+the verification that a real active-timer update would perform; check never runs it.

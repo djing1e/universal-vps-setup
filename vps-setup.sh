@@ -9893,6 +9893,43 @@ setup_spamhaus_out_observe() {
     return 0
 }
 
+guard_engine_menu_action() (
+    local action=${1:-} work base status answer
+    case "$action" in check|apply) ;; *) echo 'Неизвестное действие обновления Guard'; return 1 ;; esac
+    umask 077
+    command -v python3 >/dev/null || { echo 'Требуется Python 3'; return 1; }
+    work=$(mktemp -d /tmp/xtls-guard-upgrade.XXXXXX) || return 1
+    trap 'rm -rf "$work"' EXIT
+    base=https://raw.githubusercontent.com/djing1e/universal-vps-setup/6973b97f4a172aa99b87527af28ce92b57159f92
+    curl -fsSL --connect-timeout 10 --max-time 60 "$base/lib/guard_engine_upgrade.py" -o "$work/guard_engine_upgrade.py" || return 1
+    curl -fsSL --connect-timeout 10 --max-time 60 "$base/lib/guard_engine_policy.json" -o "$work/guard_engine_policy.json" || return 1
+    curl -fsSL --connect-timeout 10 --max-time 60 "$base/lib/vps_inventory.py" -o "$work/vps_inventory.py" || return 1
+    curl -fsSL --connect-timeout 10 --max-time 60 "$base/modules/xtls-auto-abuse-guard.py" -o "$work/candidate.py" || return 1
+    printf '%s  %s\n' \
+        2b446ae307a76b87f18f577919841779981c6f131d73bec47b9aa2f4aa25726d "$work/guard_engine_upgrade.py" \
+        3f87a241f4f4aa5b309bc2354e9c22ec192772deffac4df083facb6c464ba5ec "$work/guard_engine_policy.json" \
+        a182c62db4cd8fd6f6e364d992d468ce2a2647724acf0e7444de41c205824ed9 "$work/vps_inventory.py" \
+        f9eb32909626917a708a66907df0debf7cfc1943e626e7974e03e697996bcd03 "$work/candidate.py" | sha256sum -c - || return 1
+    echo '===== ПРОВЕРКА ОБНОВЛЕНИЯ GUARD (без замены и запусков) ====='
+    PYTHONDONTWRITEBYTECODE=1 python3 "$work/guard_engine_upgrade.py" check --candidate "$work/candidate.py" > "$work/check.json" || return 1
+    cat "$work/check.json"
+    status=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$work/check.json") || return 1
+    case "$status" in
+        noop) echo 'Движок Guard уже актуален. Замена и перезапуск не требуются.'; return 0 ;;
+        ready_for_explicit_apply) ;;
+        *) echo 'Проверка не разрешила обновление'; return 1 ;;
+    esac
+    if [[ "$action" == check ]]; then
+        echo 'Доступно обновление движка. Для применения выберите пункт 6.'
+        return 0
+    fi
+    echo 'Будет обновлён только движок Guard с резервной копией и откатом при ошибке.'
+    echo 'Активный Guard временно остановится для замены и проверки. Неактивный останется неактивным.'
+    read -e -r -p 'Для обновления введите UPDATE-GUARD-ENGINE: ' answer || return 0
+    [[ "$answer" == UPDATE-GUARD-ENGINE ]] || { echo 'Обновление отменено'; return 0; }
+    PYTHONDONTWRITEBYTECODE=1 python3 "$work/guard_engine_upgrade.py" apply --candidate "$work/candidate.py" --confirm UPDATE-GUARD-ENGINE || return 1
+)
+
 setup_auto_abuse_guard() {
     local choice installer
     installer=$(mktemp /tmp/xtls-auto-guard.XXXXXX.sh) || return 1
@@ -9909,6 +9946,8 @@ setup_auto_abuse_guard() {
         echo "2) Статус / последние наблюдения"
         echo "3) Проверить сейчас: Spamhaus + поведение подписок"
         echo "4) Отключить и удалить сервис (логи сохранить)"
+        echo "5) Проверить обновление движка (без изменений)"
+        echo "6) Обновить движок: резервная копия и откат"
         echo "0) Назад"
         read -e -r -p "Выбор: " choice || break
         case "$choice" in
@@ -9924,6 +9963,8 @@ setup_auto_abuse_guard() {
                    fi
                else echo "Сначала установите модуль"; fi ;;
             4) bash "$installer" remove ;;
+            5) guard_engine_menu_action check || echo "Проверка не завершена; изменения не применялись" ;;
+            6) guard_engine_menu_action apply || echo "Обновление не завершено. Проверьте сообщение об откате и состоянии Guard." ;;
             0) break ;;
             *) echo "Неверный выбор" ;;
         esac
