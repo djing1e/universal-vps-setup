@@ -18,8 +18,18 @@ Commands: enable-block, disable-block, restore, status. No command installs unit
 or starts/enables services automatically. The executable is deployed separately to
 /usr/local/sbin/xtls-spamhaus-udp. The supplied restore unit runs after and requires
 xtls-spamhaus-output-restore.service. Deployment and enabling are explicit steps.
-Do not install over unknown existing files/units. No menu integration is included
-in this first PR.
+Menu: 16 -> 5 -> 8. The installer uses pinned files and SHA256, refuses unknown
+existing executables/units or symlinks, and preserves matching installations and
+local exemptions/mode. Fresh installation stays in observe. Merely opening the
+menu changes nothing.
+
+The submenu provides install, status, exemptions, enable, disable and cancellation
+of the five-minute safety timer after access checks. Enable requires the phrase
+ENABLE-SPAMHAUS-UDP-DROP; timer cancellation requires KEEP-UDP-DROP. If timer
+creation fails, DROP is not enabled. The transient timer is collected after firing.
+Exemptions are edited only in observe under the module lock, with a backup of the
+previous file; /0 and symlinks are rejected. Main/Spamhaus status shows cached CIDR
+counts and live chain rules, not full set contents, and includes UDP mode/counters.
 
 Before enabling, create /etc/xtls-spamhaus-udp/exemptions.txt with reviewed IPs/CIDRs
 (one per line, optional # comments). Include required infrastructure endpoints as
