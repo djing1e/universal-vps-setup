@@ -35,6 +35,8 @@ SAVED_MODES = {
     '/etc/xtls-portscan-observe/enabled': ('enabled', 'disabled'),
 }
 PROBES = {
+    'pve_package': ['dpkg-query', '-W', '-f=${Status}', 'pve-manager'],
+    'pve_version': ['pveversion'],
     'containers': ['docker', '--host', 'unix:///var/run/docker.sock', 'ps', '-a', '--format',
                    '{"id":{{json .ID}},"name":{{json .Names}},"image":{{json .Image}},"state":{{json .State}}}'],
     'nft_tables': ['nft', 'list', 'tables'],
@@ -196,7 +198,23 @@ def collect(root=Path('/'), runner=probe, manifest=None):
             observations[name] = {'status': 'unknown', 'detail': 'Docker not confirmed active; daemon query skipped'}
         else:
             observations[name] = runner(argv)
+    pve_markers = (root/'etc/pve').exists() or (root/'usr/bin/pveversion').exists()
+    package = observations['pve_package']
+    version = observations['pve_version']
+    installed = package.get('status') == 'ok' and package.get('output', '').strip() == 'install ok installed'
+    version_ok = version.get('status') == 'ok' and version.get('output', '').startswith('pve-manager/')
+    profile = 'proxmox' if installed and version_ok else ('proxmox_uncertain' if installed or version_ok or pve_markers or os.uname().release.endswith('-pve') else 'vps')
+    if profile == 'vps' and (package.get('status') not in ('ok', 'error') or (package.get('status') == 'error' and package.get('returncode') != 1)):
+        profile = 'unknown'
+    pve = None
+    if profile != 'vps':
+        try:
+            from .proxmox_host import audit
+        except ImportError:
+            from proxmox_host import audit
+        pve = audit(root, runner)
     return {
+        'host_profile': profile, 'proxmox': pve,
         'schema_version': SCHEMA_VERSION,
         'mode': 'audit', 'changes_applied': False,
         'os': os_identity(root), 'kernel': os.uname().release,

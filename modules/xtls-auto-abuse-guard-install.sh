@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        exit 1
+    fi
 set -Eeuo pipefail
-SCRIPT_URL="https://raw.githubusercontent.com/djing1e/universal-vps-setup/6ed036bf1e09dd964bb28c1911af80380bc782ce/modules/xtls-auto-abuse-guard.py"
+SCRIPT_URL="https://raw.githubusercontent.com/djing1e/universal-vps-setup/df0124973ee0e30dd40aa85559b25d6328310878/modules/xtls-auto-abuse-guard.py"
 TARGET=/usr/local/sbin/xtls-auto-abuse-guard
 SERVICE=/etc/systemd/system/xtls-auto-abuse-guard.service
 TIMER=/etc/systemd/system/xtls-auto-abuse-guard.timer

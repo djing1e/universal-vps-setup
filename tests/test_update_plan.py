@@ -48,7 +48,7 @@ class UpdatePlanTests(unittest.TestCase):
             if not item['known_previous_sha256']: continue
             self.report['modules'][item['path']] = {'status':'custom_or_unknown','sha256':item['known_previous_sha256'][0]}
         result = self.plan()
-        self.assertEqual(result['summary']['review_required'],3)
+        self.assertEqual(result['summary']['review_required'],4)
         for row in result['steps']:
             if row['status'] == 'noop': continue
             self.assertIn('ownership_not_established',row['reasons'])

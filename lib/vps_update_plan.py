@@ -112,6 +112,8 @@ def build_plan(report, selected, catalog):
             else:
                 row['preserve_saved_mode'] = {'path': mode_spec['path'], 'value': mode['value']}
 
+        if report.get('host_profile', 'vps') != 'vps':
+            reasons.append('proxmox_host_vps_modules_blocked')
         if not supported_os:
             reasons.append('unsupported_or_unknown_os')
         for unit in item['units']:

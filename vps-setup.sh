@@ -6,6 +6,16 @@
 # ╚══════════════════════════════════════════╝
 # Запускать от root: sudo -i, затем bash vps-setup.sh
 
+# Proxmox is routed BEFORE log initialization or any provisioning command.
+if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+   [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+    echo 'PROFILE: Proxmox Host — Audit only; VPS actions are blocked.' >&2
+    _proxmox_module="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/proxmox_host.py"
+    [[ -f "$_proxmox_module" ]] || { echo 'Full reviewed repository checkout required for Proxmox audit.' >&2; exit 1; }
+    python3 "$_proxmox_module" audit
+    exit $?
+fi
+
 # =====================================
 # КОНФИГУРАЦИЯ — измени под себя
 # =====================================
@@ -119,6 +129,13 @@ log_section() {
 # dig @1.1.1.1 напрямую работает. UFW даёт это правило сам, но после пересборки
 # фаервола (CrowdSec сносит UFW) оно теряется.
 ensure_loopback_accept() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local ipt
     for ipt in iptables ip6tables; do
         command -v "$ipt" >/dev/null 2>&1 || continue
@@ -143,6 +160,13 @@ wait_for_dns() {
 
 # Managed AS/Threat IPSet persistence: no global iptables-restore.
 install_managed_blocklist_runtime() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     install -d -m 700 /usr/local/sbin /usr/local/bin
     cat > /usr/local/bin/firewall-blocklist-update.sh <<'MANAGED_UPDATER'
 #!/usr/bin/env bash
@@ -410,6 +434,13 @@ UNIT
 }
 
 persist_ipsets() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     command -v ipset >/dev/null 2>&1 || return 1
     local tmp name count=0
     tmp=$(mktemp /etc/.ipset.conf.XXXXXXXX) || return 1
@@ -428,12 +459,26 @@ persist_ipsets() {
 }
 
 managed_remove_legacy_cron() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local script="$1" current filtered
     current=$(crontab -l 2>/dev/null) || return 0
     filtered=$(printf '%s\n' "$current" | grep -vF -- "$script" || true)
     if [[ -n "$filtered" ]]; then printf '%s\n' "$filtered" | crontab -; else crontab -r 2>/dev/null || true; fi
 }
 managed_remove_set_rules() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local cmd="$1" name="$2" chain
     for chain in INPUT SCANNERS-BLOCK; do
         if [[ "$chain" == INPUT ]]; then
@@ -448,6 +493,13 @@ managed_remove_set_rules() {
     done
 }
 managed_remove_ipsets() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local name
     managed_remove_set_rules iptables "$1" || return 1
     managed_remove_set_rules ip6tables "$2" || return 1
@@ -459,6 +511,13 @@ managed_remove_ipsets() {
 }
 
 enable_managed_blocklist_timer() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local mode="$1"
     systemctl enable --now "${mode}-blacklist-update.timer"
 }
@@ -502,6 +561,13 @@ vps_fetch_github() {
 # МОДУЛЬ 1: БАЗОВАЯ НАСТРОЙКА
 # =====================================
 setup_base() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     print_header
     echo "╔══════════════════════════════╗"
     echo "║   Базовая настройка сервера ║"
@@ -565,6 +631,13 @@ _ru_default_mirror_reachable() {
 }
 
 prepare_ru_node() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     # определяем дистрибутив и кодовое имя
     local id codename
     if [ -f /etc/os-release ]; then
@@ -648,6 +721,13 @@ EOF
 
 # Docker: ставит docker.io из репо дистрибутива, если get.docker.com недоступен (РФ).
 prepare_ru_docker() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     if command -v docker >/dev/null 2>&1; then
         return 0   # Docker уже есть
     fi
@@ -673,6 +753,13 @@ EOF
 }
 
 do_update_packages() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     log_section "Обновление пакетов"
     prepare_ru_node        # авто-подмена зеркал, если дефолт недоступен (РФ)
@@ -682,6 +769,13 @@ do_update_packages() {
 }
 
 do_ssh_setup() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     log_section "Настройка SSH"
 
@@ -744,6 +838,13 @@ do_ssh_setup() {
 }
 
 do_ufw_setup() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     log_section "Настройка UFW"
 
@@ -798,6 +899,13 @@ do_ufw_setup() {
 }
 
 do_sysctl_setup() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     log_section "Тюнинг ядра/сети (полный, из модуля 14)"
     # Переиспользуем отлаженные функции модуля 14 вместо старого кривого блока.
@@ -820,6 +928,13 @@ do_sysctl_setup() {
 }
 
 do_autoupgrade() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     log_section "Автообновления безопасности"
     cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOF'
@@ -831,6 +946,13 @@ EOF
 }
 
 do_fail2ban() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     log_section "Настройка fail2ban"
     apt install -y fail2ban
@@ -903,6 +1025,13 @@ EOF
 # rn_setup_github_mirror (определены в модуле нод; к моменту вызова из меню
 # все функции уже загружены в память).
 do_docker_mirrors() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     log_section "Docker + зеркала"
     echo "  Шаги (каждый с подтверждением):"
@@ -959,6 +1088,13 @@ vps_ipv6_audit() {
 }
 
 setup_ipv6() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     print_header
     echo "╔══════════════════════════╗"
     echo "║   Управление IPv6       ║"
@@ -994,6 +1130,13 @@ setup_ipv6() {
 # МОДУЛЬ 3: CROWDSEC + TRAFFIC-GUARD
 # =====================================
 setup_crowdsec() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     print_header
     echo "╔══════════════════════════════════════╗"
     echo "║   CrowdSec Manager                   ║"
@@ -1016,6 +1159,13 @@ setup_crowdsec() {
 }
 
 crowdsec_config_fingerprint() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     python3 - <<'PYFINGERPRINT'
 from pathlib import Path
 import hashlib
@@ -1089,6 +1239,13 @@ PYFINGERPRINT
 # A stale Hub index can cause "invalid download hash" on freshly installed systems.
 # Refresh the index only on that specific failure and retry once.
 crowdsec_ensure_collection() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local collection="$1" required="$2" output rc
     if cscli collections inspect "$collection" >/dev/null 2>&1; then
         echo "✓ Коллекция уже установлена: $collection (штатные/tainted файлы сохраняем)"
@@ -1129,6 +1286,13 @@ crowdsec_ensure_collection() {
 }
 
 crowdsec_install() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     echo "=== [1/7] Установка CrowdSec ==="
 
@@ -1545,6 +1709,13 @@ EOF
 }
 
 crowdsec_uninstall() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     echo "=== Удаление CrowdSec ==="
     read -r -e -p "Удалить CrowdSec и Firewall Bouncer? (y/n): " CONFIRM
@@ -1612,6 +1783,13 @@ crowdsec_uninstall() {
 }
 
 crowdsec_status() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     echo "=== Статус CrowdSec ==="
     systemctl status crowdsec --no-pager | head -4
@@ -1702,6 +1880,13 @@ show_system_status() {
 # МОДУЛЬ 5: NEXTDNS (DoT / DoH)
 # =====================================
 _nextdns_status() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local conf=/etc/systemd/resolved.conf.d/nextdns.conf
     if [ -f "$conf" ]; then
         grep -E '^# NextDNS managed:' "$conf" || true
@@ -1719,6 +1904,13 @@ _nextdns_status() {
 }
 
 _nextdns_doh_stamp() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     # Provider-specific DoH stamps with pinned IPv4 and validated TLS hostname.
     python3 - "$1" "$2" <<'PY_STAMP'
 import base64,ipaddress,sys
@@ -1734,6 +1926,13 @@ PY_STAMP
 }
 
 _nextdns_doh_probe() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     # Verify real profile-specific DoH response with TLS validation and pinned IP.
     local profile="$1" ip="$2" result
     local host url
@@ -1760,6 +1959,13 @@ except (ValueError,AssertionError,TypeError,AttributeError):
 # Debian 12 Bookworm does not ship dnscrypt-proxy in its regular APT repositories.
 # Use a pinned upstream release with GitHub-published SHA256, without mixing suites.
 _nextdns_bookworm_binary() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local version=2.1.19 arch asset sha archive tmp_bin base url
     arch="$(dpkg --print-architecture)" || return 1
     case "$arch" in
@@ -1803,6 +2009,13 @@ _nextdns_bookworm_binary() {
 }
 
 _nextdns_doh_prepare() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local profile="$1" stamp ip i successes selected=() candidates dnscrypt_bin=/usr/sbin/dnscrypt-proxy
     if (. /etc/os-release; [ "$ID" = debian ] && [ "$VERSION_ID" = 12 ]); then
         if ! apt-get install -y --no-remove python3 dnsutils curl ca-certificates ||
@@ -1936,6 +2149,13 @@ EOF_UNIT
 }
 
 _nextdns_verify() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local protocol="$1" expected_profile="${2:-}" result
     resolvectl flush-caches >/dev/null 2>&1 || true
     timeout 12 resolvectl query example.com >/dev/null 2>&1 || return 1
@@ -1970,6 +2190,13 @@ sys.exit(0 if d.get("status")=="ok" and str(d.get("protocol","")).upper()==proto
 
 # Persistent systemd-networkd DNS isolation; does not touch IP/gateway/routes.
 _nextdns_network_dropin_path() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local iface file
     iface="$(ip -4 route show default 2>/dev/null | awk '/^default / {for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}')"
     [ -n "$iface" ] || return 1
@@ -1980,6 +2207,13 @@ _nextdns_network_dropin_path() {
 }
 
 _nextdns_network_enable() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local path dir state=/var/lib/vps-nextdns tmp
     # ifupdown/NetworkManager hosts have no networkd .network file to modify.
     # Never restart networking or rewrite interfaces on a remote VPS.
@@ -2018,6 +2252,13 @@ EOF_NEXTDNS_NET
 }
 
 _nextdns_network_restore() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local state=/var/lib/vps-nextdns path
     if ! systemctl is-active --quiet systemd-networkd; then
         echo 'NextDNS: networkd не активен, сетевой интерфейс оставлен без изменений'
@@ -2043,6 +2284,13 @@ _nextdns_network_restore() {
 
 # Snapshot and restore the managed networkd drop-in and state atomically.
 _nextdns_network_snapshot() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local dir="$1" path
     if ! systemctl is-active --quiet systemd-networkd; then
         # Marker ensures rollback never invokes networkctl on ifupdown systems.
@@ -2057,6 +2305,13 @@ _nextdns_network_snapshot() {
     fi
 }
 _nextdns_network_snapshot_restore() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local dir="$1" path tmp reload_rc=0
     if [ -f "$dir/no-networkd" ]; then
         return 0
@@ -2092,6 +2347,13 @@ _nextdns_network_snapshot_restore() {
 }
 
 _nextdns_rollback_health() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local old_conf="$1" previous="$2" previous_protocol=""
     timeout 12 resolvectl query example.com >/dev/null 2>&1 || return 1
     if [ "$previous" -eq 1 ]; then
@@ -2110,6 +2372,13 @@ _nextdns_rollback_health() {
 # v3: preserve the original resolver symlink across reboots and switches.
 # Only symlinks to systemd-resolved's supported files are managed automatically.
 _nextdns_resolv_snapshot() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local dir="$1" state=/var/lib/vps-nextdns
     if [ -L /etc/resolv.conf ]; then
         readlink /etc/resolv.conf > "$dir/resolv-target" || return 1
@@ -2133,6 +2402,13 @@ _nextdns_resolv_snapshot() {
 }
 
 _nextdns_resolv_restore_snapshot() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local dir="$1" target tmp state=/var/lib/vps-nextdns
     if [ -f "$dir/resolv-target" ]; then
         target="$(cat "$dir/resolv-target")" || return 1
@@ -2167,6 +2443,13 @@ _nextdns_resolv_restore_snapshot() {
 }
 
 _nextdns_resolv_enable() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local dir="$1" state=/var/lib/vps-nextdns target
     [ -f /run/systemd/resolve/stub-resolv.conf ] || {
         echo 'ОШИБКА: systemd-resolved stub-resolv.conf отсутствует' >&2; return 1;
@@ -2197,6 +2480,13 @@ _nextdns_resolv_enable() {
 }
 
 _nextdns_resolv_disable() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local state=/var/lib/vps-nextdns target tmp
     if [ -f "$state/resolv-original-target" ]; then
         target="$(cat "$state/resolv-original-target")" || return 1
@@ -2219,6 +2509,13 @@ _nextdns_resolv_disable() {
 }
 
 _nextdns_apply() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local profile="$1" protocol="${2:-dot}"
     local conf=/etc/systemd/resolved.conf.d/nextdns.conf
     local dohconf=/etc/nextdns-doh/dnscrypt-proxy.toml
@@ -2369,6 +2666,13 @@ EOF_RES
 }
 
 _nextdns_rollback() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local conf="$1" saved="$2" previous="$3" dohconf="$4" old_doh="$5" had_doh="$6" was_active="$7"
     if [ "$previous" -eq 1 ]; then cp -a "$saved" "$conf"; else rm -f "$conf"; fi
     if [ "$had_doh" -eq 1 ]; then
@@ -2387,6 +2691,13 @@ _nextdns_rollback() {
 }
 
 _nextdns_disable() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local conf=/etc/systemd/resolved.conf.d/nextdns.conf
     if systemctl is-active --quiet cloudflare-doh.service ||
        [ -f /etc/systemd/resolved.conf.d/90-cloudflare-doh.conf ]; then
@@ -2431,6 +2742,13 @@ _nextdns_disable() {
 }
 
 setup_nextdns() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     print_header
     echo '=== Настройка DNS (NextDNS / Cloudflare) ==='
     _nextdns_status
@@ -2664,6 +2982,13 @@ GEOBLOCK_CONF="/etc/geoblock"
 
 # Скачать диапазоны страны из нескольких источников
 geoblock_download_country() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local cc="$1"         # код страны: ru, by, kz
     local ipset_n="$2"    # имя ipset
     local family="$3"     # ipv4 | ipv6
@@ -2709,6 +3034,13 @@ except: pass
 }
 
 setup_geoblock() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     print_header
     echo "╔══════════════════════════════════════╗"
     echo "║   GeoBlock — блокировка по странам  ║"
@@ -2745,6 +3077,13 @@ setup_geoblock() {
 }
 
 geoblock_enable() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     log_section "Включение GeoBlock"
 
@@ -3095,6 +3434,13 @@ SCRIPT
 }
 
 geoblock_add_country() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     read -e -p "Код страны для добавления (например: by): " CC
     CC=$(echo "$CC" | tr '[:upper:]' '[:lower:]')
@@ -3113,6 +3459,13 @@ geoblock_add_country() {
 }
 
 geoblock_remove_country() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     [ ! -f "$GEOBLOCK_CONF/countries.txt" ] && echo "Список стран не найден." && return
     echo "Текущие страны:"
@@ -3126,6 +3479,13 @@ geoblock_remove_country() {
 }
 
 geoblock_remove_rules() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     # Удаляем из ufw-before-input если UFW есть
     if iptables -L ufw-before-input -n &>/dev/null 2>&1; then
         while iptables -D ufw-before-input -j "$GEOBLOCK_CHAIN" 2>/dev/null; do true; done
@@ -3142,6 +3502,13 @@ geoblock_remove_rules() {
 }
 
 geoblock_disable() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     read -e -p "Выключить GeoBlock? Весь трафик будет разрешён. (y/n): " CONFIRM
     [[ "$CONFIRM" != "y" ]] && echo "Отменено." && return
@@ -3159,6 +3526,13 @@ geoblock_disable() {
 }
 
 geoblock_status() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     echo "══════════════════════════════════════"
     echo " GeoBlock — статус"
@@ -3190,6 +3564,13 @@ geoblock_status() {
 # МОДУЛЬ 9: SWAP
 # =====================================
 setup_swap() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     print_header
     echo "╔══════════════════════════╗"
     echo "║   Управление Swap       ║"
@@ -3226,6 +3607,13 @@ setup_swap() {
 }
 
 swap_create() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local RAM_MB="$1"
 
     if swapon --show 2>/dev/null | grep -q "/swapfile"; then
@@ -3290,6 +3678,13 @@ swap_create() {
 }
 
 swap_delete() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     if ! swapon --show 2>/dev/null | grep -q "/swapfile"; then
         echo "/swapfile не найден."; return
@@ -3301,6 +3696,13 @@ swap_delete() {
 }
 
 swap_delete_silent() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     swapoff /swapfile 2>/dev/null || true
     rm -f /swapfile
     sed -i '/\/swapfile/d' /etc/fstab
@@ -3308,6 +3710,13 @@ swap_delete_silent() {
 }
 
 swap_swappiness() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     CURRENT=$(cat /proc/sys/vm/swappiness)
     echo "Текущий swappiness: $CURRENT"
@@ -3334,12 +3743,47 @@ swap_swappiness() {
 _RN_RED='\033[0;31m'; _RN_GREEN='\033[0;32m'; _RN_YELLOW='\033[1;33m'
 _RN_CYAN='\033[0;36m'; _RN_BOLD='\033[1m'; _RN_RESET='\033[0m'
 
-rn_info()    { echo -e "${_RN_CYAN}[INFO]${_RN_RESET} $*"; }
-rn_success() { echo -e "${_RN_GREEN}[OK]${_RN_RESET}   $*"; }
-rn_warn()    { echo -e "${_RN_YELLOW}[WARN]${_RN_RESET} $*"; }
-rn_error()   { echo -e "${_RN_RED}[ERR]${_RN_RESET}  $*"; return 1; }
+rn_info()    {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+ echo -e "${_RN_CYAN}[INFO]${_RN_RESET} $*"; }
+rn_success() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+ echo -e "${_RN_GREEN}[OK]${_RN_RESET}   $*"; }
+rn_warn()    {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+ echo -e "${_RN_YELLOW}[WARN]${_RN_RESET} $*"; }
+rn_error()   {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+ echo -e "${_RN_RED}[ERR]${_RN_RESET}  $*"; return 1; }
 
 rn_is_yes() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   local v="${1,,}"
   case "$v" in
     y|yes|"") return 0 ;;
@@ -3348,6 +3792,13 @@ rn_is_yes() {
 }
 
 rn_choose_install_dir() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   echo -e "\n${_RN_BOLD}Куда установить?${_RN_RESET}"
   echo "  1) /opt/remnanode   (рекомендуется)"
   echo "  2) /root/remnanode"
@@ -3368,6 +3819,13 @@ rn_choose_install_dir() {
 }
 
 rn_ask_params() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   echo ""
   while true; do
     read -rep "Порт remnanode [Enter = 2222]: " RN_NODE_PORT
@@ -3468,6 +3926,13 @@ rn_ask_params() {
 }
 
 rn_install_docker() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   if command -v docker >/dev/null 2>&1; then
     if systemctl enable --now docker.service >/dev/null 2>&1 &&
        docker info >/dev/null 2>&1; then
@@ -3514,6 +3979,13 @@ rn_install_docker() {
 }
 
 rn_compose() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   if docker compose version >/dev/null 2>&1; then
     docker compose "$@"
   elif command -v docker-compose >/dev/null 2>&1; then
@@ -3525,6 +3997,13 @@ rn_compose() {
 }
 
 rn_fix_docker_socket() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   # Вызывается если docker уже стоит но не работает
   if ! docker info &>/dev/null 2>&1; then
     rn_warn "Docker daemon не отвечает — исправляю docker.socket..."
@@ -3543,6 +4022,13 @@ rn_fix_docker_socket() {
 }
 
 rn_install_deps() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   rn_info "Обновление пакетов и установка зависимостей..."
   apt-get update -qq || { rn_error "APT update завершился ошибкой"; return 1; }
   if ! command -v logrotate >/dev/null 2>&1; then
@@ -3568,6 +4054,13 @@ rn_install_deps() {
 }
 
 rn_prepare_dirs() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   rn_info "Подготовка директорий..."
   mkdir -p "${RN_INSTALL_DIR}"
   mkdir -p /var/log/remnanode
@@ -3578,6 +4071,13 @@ rn_prepare_dirs() {
 }
 
 rn_create_stub() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   # По требованию: заглушку-декой НЕ ставим, только гарантируем наличие папки.
   # Selfsteal-контент (если нужен) кладётся в /var/www/html вручную.
   mkdir -p /var/www/html
@@ -3586,6 +4086,13 @@ rn_create_stub() {
 }
 
 rn_ask_cloudflare() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   echo ""
   echo -e "${_RN_BOLD}Cloudflare DNS Challenge для автоматического перевыпуска сертификата?${_RN_RESET}"
   echo "  Нужен если домен стоит за Cloudflare Proxy (оранжевое облако)."
@@ -3622,6 +4129,13 @@ rn_ask_cloudflare() {
 }
 
 rn_create_dockerfile() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   if [[ "$RN_CF_MODE" != true ]]; then
     return 0
   fi
@@ -3636,6 +4150,13 @@ DOCKERFILE
 }
 
 rn_create_caddyfile() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   rn_info "Создаю Caddyfile (selfsteal: Caddy за xray на unix-сокете)..."
 
   # SELFSTEAL-АРХИТЕКТУРА:
@@ -3726,6 +4247,13 @@ EOF
 }
 
 rn_create_compose() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   rn_info "Создаю docker-compose.yml..."
 
   if [[ "$RN_CF_MODE" == true ]]; then
@@ -3873,6 +4401,13 @@ PY_RN_MEM
 }
 
 rn_setup_oom_watcher() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   if [[ "$RN_XHTTP_MODE" != true ]]; then
     return 0
   fi
@@ -3916,6 +4451,13 @@ WATCHER
 }
 
 rn_setup_logrotate() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   rn_info "Настройка logrotate..."
   cat > /etc/logrotate.d/remnanode <<'EOF'
 /var/log/remnanode/*.log {
@@ -3933,6 +4475,13 @@ EOF
 }
 
 rn_open_panel_port() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   # Открыть порт ноды (RN_NODE_PORT, обычно 2222) для управляющего трафика панели.
   # Если задан IP панели — открываем ТОЛЬКО для него (меньше поверхность атаки).
   # Иначе — всем. 443 (клиентский selfsteal) уже должен быть открыт базовой настройкой.
@@ -3957,6 +4506,13 @@ rn_open_panel_port() {
 }
 
 rn_start_services() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   cd "${RN_INSTALL_DIR}" || return 1
   rn_compose config -q || { rn_error "Compose config невалиден"; return 1; }
   if [[ "$RN_CF_MODE" == true ]]; then
@@ -3981,6 +4537,13 @@ rn_start_services() {
 }
 
 rn_print_summary() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   echo ""
   echo -e "${_RN_GREEN}${_RN_BOLD}════════════════════════════════════════${_RN_RESET}"
   echo -e "${_RN_GREEN}${_RN_BOLD}  Установка завершена!${_RN_RESET}"
@@ -4017,6 +4580,13 @@ rn_print_summary() {
 # Идемпотентно — повторный вызов ничего не дублирует. Делает .bak перед правкой.
 # Использует python3 (есть в Ubuntu по умолчанию) для безопасной правки YAML по отступам.
 rn_patch_compose_logging() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   local compose="$1"
   if [[ ! -f "$compose" ]]; then
     rn_error "docker-compose.yml не найден: ${compose}"
@@ -4164,12 +4734,26 @@ RN_GITHUB_MIRRORS=(
 
 # Проверка доступности зеркала: HTTP-ответ за 3с (любой код кроме таймаута = жив)
 rn_mirror_alive() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   local url="$1"
   curl -fsS -I --connect-timeout 3 --max-time 4 -o /dev/null "$url" 2>/dev/null
 }
 
 # ── Установка Docker через get.docker.com ──
 rn_install_docker_get() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   echo ""
   log_section "Установка Docker (get.docker.com)"
   if command -v docker &>/dev/null; then
@@ -4197,6 +4781,13 @@ rn_install_docker_get() {
 
 # ── Настройка Docker registry mirror (с проверкой доступности) ──
 rn_setup_docker_mirror() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   echo ""
   log_section "Настройка Docker registry mirror"
   echo "  Проверяю доступность зеркал (таймаут 3с каждое)..."
@@ -4270,6 +4861,13 @@ PYEOF
 
 # ── Настройка github-зеркал (git insteadOf + проверка) ──
 rn_setup_github_mirror() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   echo ""
   log_section "Настройка github-зеркал"
   echo "  github-зеркала используются скриптом (vps_fetch_github: jsdelivr→github)"
@@ -4317,6 +4915,13 @@ rn_setup_github_mirror() {
 
 # ── Заглушка selfsteal (Edge Node) ──
 rn_install_edge_stub() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   echo ""
   log_section "Установка заглушки selfsteal (Edge Node)"
   local target_dir="/var/www/html"
@@ -4945,6 +5550,13 @@ EDGE_STUB_HTML_EOF
 
 # ── Логирование (Docker + зеркала + патч compose + logrotate) ──
 rn_node_logging() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   print_header
   echo "╔══════════════════════════════════════════╗"
   echo "║   Настройка нод — Логирование            ║"
@@ -4992,6 +5604,13 @@ rn_node_logging() {
 
 # ── Подменю «Настройка нод» ──
 setup_node_config() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   while true; do
     print_header
     echo "╔══════════════════════════════════════════╗"
@@ -5022,6 +5641,13 @@ setup_node_config() {
 
 
 setup_remnanode() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   while true; do
     print_header
     echo "╔══════════════════════════════════════════╗"
@@ -5066,6 +5692,13 @@ setup_remnanode() {
 }
 
 setup_remnanode_builtin() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     print_header
     echo "╔══════════════════════════════════════╗"
     echo "║   Установка remnanode + Caddy        ║"
@@ -5095,6 +5728,13 @@ setup_remnanode_builtin() {
 }
 
 setup_remnanode_egames() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     print_header
     echo "╔══════════════════════════════════════════════╗"
     echo "║   remnanode — eGamesAPI reverse-proxy       ║"
@@ -5121,6 +5761,13 @@ setup_remnanode_egames() {
 }
 
 setup_remnanode_classic() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     print_header
     echo "╔══════════════════════════════════════════════╗"
     echo "║   remnanode — классическая установка        ║"
@@ -5231,16 +5878,44 @@ TBS_TOOL=/usr/local/lib/tbsync/tbsync.py
 TBS_KEY=/root/.ssh/tbsync
 TBS_LOG=/var/log/tbsync.log
 
-tbs_role() { [ -f "$TBS_CONF" ] && (. "$TBS_CONF"; echo "${ROLE:-}"); }
+tbs_role() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+ [ -f "$TBS_CONF" ] && (. "$TBS_CONF"; echo "${ROLE:-}"); }
 
-tbs_valid_ip() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
+tbs_valid_ip() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+ [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 
 tbs_local_ips() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     ip -4 -o addr show 2>/dev/null | awk '$2!="lo" && $2!~/^docker|^br-|^veth/ {print "    "$2": "$4}'
 }
 
 # Общий python-инструмент (ставится на обе роли)
 tbs_write_tool() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     command -v python3 >/dev/null 2>&1 || apt-get install -y python3 >/dev/null 2>&1
     mkdir -p /usr/local/lib/tbsync /var/lib/tbsync
     cat > "$TBS_TOOL" << 'PYEOF'
@@ -5506,6 +6181,13 @@ EOF
 }
 
 tbs_install_relay() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     print_header
     echo "╔══════════════════════════════════════════════╗"
     echo "║   Torrent-бан: установка на RELAY            ║"
@@ -5638,6 +6320,13 @@ EOF
 }
 
 tbs_install_bs() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     print_header
     echo "╔══════════════════════════════════════════════╗"
     echo "║   Torrent-бан: установка на BS (haproxy)     ║"
@@ -5805,6 +6494,13 @@ EOF
 }
 
 tbs_show() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local role; role=$(tbs_role)
     [ -z "$role" ] && { rn_warn "tbsync не установлен на этой машине"; return; }
     while true; do
@@ -5822,6 +6518,13 @@ tbs_show() {
 }
 
 tbs_status() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     print_header
     local role; role=$(tbs_role)
     echo "  Роль: ${role:-не установлен}"
@@ -5848,6 +6551,13 @@ tbs_status() {
 }
 
 tbs_unban() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local role; role=$(tbs_role)
     if [ "$role" = "bs" ]; then
         rn_warn "Разбан делается на RELAY — BS лишь зеркалит её."
@@ -5867,6 +6577,13 @@ tbs_unban() {
 }
 
 tbs_remove() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local role; role=$(tbs_role)
     [ -z "$role" ] && { rn_warn "tbsync не установлен"; return; }
     read -rep "  Удалить tbsync (роль: $role)? [y/N]: " _a
@@ -5892,6 +6609,13 @@ tbs_remove() {
 }
 
 setup_tbsync() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     while true; do
         print_header
         local role; role=$(tbs_role)
@@ -5935,6 +6659,13 @@ setup_tbsync() {
 # МОДУЛЬ 11: ШЕЙПЕР СКОРОСТИ
 # =====================================
 setup_speed_shaper() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     print_header
     echo "╔══════════════════════════════════════╗"
     echo "║   Шейпер скорости (Traffic Shaper)  ║"
@@ -6007,6 +6738,13 @@ setup_speed_shaper() {
 PROBE_PY="/usr/local/sbin/probe-server.py"
 
 _probe_write_py() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     cat > "$PROBE_PY" <<'PROBE_PY_EOF'
 #!/usr/bin/env python3
 """probe-server — диагностика доступности (HTTP + HTTPS с самоподписанным сертом)."""
@@ -6191,6 +6929,13 @@ PROBE_PY_EOF
 # Открыть порт в слоях фильтрации (UFW + vpsguard + iptables),
 # иначе пробник будет недоступен снаружи и диагностика соврёт.
 _probe_open_port() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local port="$1"
     [ -z "$port" ] || [ "$port" = "0" ] && return 0
     command -v ufw >/dev/null 2>&1 && ufw allow "${port}/tcp" >/dev/null 2>&1
@@ -6202,6 +6947,13 @@ _probe_open_port() {
 }
 
 _probe_close_port() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local port="$1"
     [ -z "$port" ] || [ "$port" = "0" ] && return 0
     command -v ufw >/dev/null 2>&1 && ufw delete allow "${port}/tcp" >/dev/null 2>&1
@@ -6215,6 +6967,13 @@ _probe_close_port() {
 }
 
 setup_probe_server() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     print_header
     echo "╔══════════════════════════════════════════════╗"
     echo "║  Probe-сервер — доступность IP снаружи/из РФ ║"
@@ -6297,6 +7056,13 @@ setup_probe_server() {
 # МОДУЛЬ 12: AS_Network_List BLACKLIST
 # =====================================
 setup_as_blacklist() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     print_header
     echo "╔══════════════════════════════════════════╗"
     echo "║   AS_Network_List — блокировка госсетей ║"
@@ -6332,6 +7098,13 @@ ASB_LOG="/var/log/as-blacklist-update.log"
 ASB_CRON_SCRIPT="/usr/local/bin/as-blacklist-update.sh"
 
 asb_detect_crowdsec() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     # Debian's bouncer uses mode: ${BACKEND} in the base file and
     # mode: nftables in .yaml.local. The local override takes precedence.
     if ! systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
@@ -6354,12 +7127,26 @@ asb_detect_crowdsec() {
 }
 
 asb_detect_trafficguard() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     # Traffic-Guard выпилен из скрипта — всегда ставим правила в INPUT, не в SCANNERS-BLOCK.
     # (даже если на старой ноде остался призрак цепочки SCANNERS-BLOCK — игнорируем его)
     return 1
 }
 
 asb_print_env() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local cs_mode="$1"
     echo ""
     echo "  Обнаруженное окружение:"
@@ -6373,6 +7160,13 @@ asb_print_env() {
 }
 
 asb_install_iptables() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     log_section "AS_Network_List — установка через iptables/ipset"
 
@@ -6544,6 +7338,13 @@ asb_install_iptables() {
 }
 
 asb_create_update_script_iptables() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     cat > "$ASB_CRON_SCRIPT" <<'UPDATER'
 #!/usr/bin/env bash
 # Ежедневное обновление AS_Network_List (iptables/ipset)
@@ -6612,6 +7413,13 @@ UPDATER
 }
 
 asb_install_nftables() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     log_section "AS_Network_List — установка через nftables"
 
@@ -6671,6 +7479,13 @@ asb_install_nftables() {
 }
 
 asb_create_update_script_nftables() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     cat > "$ASB_CRON_SCRIPT" <<'UPDATER'
 #!/usr/bin/env bash
 # Ежедневное обновление AS_Network_List (nftables)
@@ -6713,6 +7528,13 @@ UPDATER
 }
 
 asb_cron_setup() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     if [[ -f "$ASB_DIR/mode" ]] && [[ $(cat "$ASB_DIR/mode") != nftables ]]; then
         enable_managed_blocklist_timer as
         return $?
@@ -6730,6 +7552,13 @@ asb_cron_setup() {
 }
 
 asb_cron_menu() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     local mode=""
     [[ -f "$ASB_DIR/mode" ]] && mode=$(cat "$ASB_DIR/mode")
@@ -6757,6 +7586,13 @@ asb_cron_menu() {
 }
 
 asb_status() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     echo "══════════════════════════════════════"
     echo " AS_Network_List — статус"
@@ -6811,6 +7647,13 @@ asb_status() {
 }
 
 asb_remove() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     read -r -e -p "Удалить все правила AS_Network_List? (y/n): " CONFIRM
     [[ "$CONFIRM" == y ]] || { echo "Отменено."; return 0; }
@@ -6846,6 +7689,13 @@ WARP_INSTALL_URL="https://raw.githubusercontent.com/distillium/warp-native/main/
 
 # ── Проверка статуса WARP локально ──
 warp_local_status() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   echo ""
   echo "══════════════════════════════════════"
   echo " WARP — локальный статус"
@@ -6886,6 +7736,13 @@ warp_local_status() {
 
 # ── Локальная установка ──
 warp_install_local() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   echo ""
   log_section "Установка warp-native (локально)"
 
@@ -6943,6 +7800,13 @@ warp_install_local() {
 
 # ── Подсказка по xray-маршрутизации ──
 warp_print_xray_hint() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   cat <<'HINT'
   В конфиг xray ноды добавь outbound:
 
@@ -6971,6 +7835,13 @@ HINT
 # Заполняет глобальные: WSSH_TARGET (строка вида user@host или alias),
 # WSSH_OPTS (массив доп. опций ssh), WSSH_DESC (человекочит. описание)
 warp_collect_ssh_profile() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   WSSH_TARGET=""
   WSSH_OPTS=()
   WSSH_DESC=""
@@ -7033,6 +7904,13 @@ warp_collect_ssh_profile() {
 
 # ── Установка по SSH ──
 warp_install_ssh() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   if ! command -v ssh &>/dev/null; then
     rn_error "ssh-клиент не найден на этой машине"
     return
@@ -7100,6 +7978,13 @@ exit $rc'
 
 # ── Статус по SSH ──
 warp_status_ssh() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   if ! command -v ssh &>/dev/null; then
     rn_error "ssh-клиент не найден"
     return
@@ -7120,6 +8005,13 @@ warp_status_ssh() {
 }
 
 setup_warp() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   while true; do
     print_header
     echo "╔══════════════════════════════════════════╗"
@@ -7166,10 +8058,24 @@ setup_warp() {
 KT_REBOOT_NEEDED=0
 
 # ── детект основного интерфейса ──
-kt_default_iface() { ip -o -4 route show default 2>/dev/null | awk '{print $5; exit}'; }
+kt_default_iface() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+ ip -o -4 route show default 2>/dev/null | awk '{print $5; exit}'; }
 
 # ── уровень x86-64 psABI (1..4) по флагам CPU — для выбора сборки XanMod ──
 kt_psabi_level() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local flags lvl=1 x ok
     flags=" $(grep -m1 '^flags' /proc/cpuinfo 2>/dev/null | cut -d: -f2) "
     ok=1; for x in cx16 lahf_lm popcnt sse4_1 sse4_2 ssse3; do [[ "$flags" == *" $x "* ]] || ok=0; done
@@ -7187,6 +8093,13 @@ kt_psabi_level() {
 
 # ── контейнер? (делит ядро хоста → кастомное ядро не поставить) ──
 kt_is_container() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local v="unknown"
     command -v systemd-detect-virt >/dev/null 2>&1 && v="$(systemd-detect-virt 2>/dev/null || echo none)"
     case "$v" in openvz|lxc|lxc-libvirt|docker|podman|systemd-nspawn|wsl|rkt) return 0;; *) return 1;; esac
@@ -7196,6 +8109,13 @@ kt_is_container() {
 # 14.1 — sysctl + conntrack
 # =====================================================
 kt_strip_old_sysctl() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     # Снимаем блок sysctl из Модуля 1 (базовая настройка), чтобы был один источник правды.
     local f=/etc/sysctl.conf tmp
     [ -f "$f" ] || return 0
@@ -7207,6 +8127,13 @@ kt_strip_old_sysctl() {
 }
 
 kt_apply_sysctl() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     log_section "Тюнинг: sysctl + conntrack"
 
@@ -7333,6 +8260,13 @@ CT
 # 14.2 — лимиты nofile/nproc → 1048576
 # =====================================================
 kt_apply_limits() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     log_section "Тюнинг: nofile/nproc → 1048576"
     # снять блок Модуля 1 (65535) и наш прошлый
@@ -7369,6 +8303,13 @@ L
 # 14.3 — RPS/RFS/XPS (раскидываем softirq по ядрам)
 # =====================================================
 kt_apply_rps() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     log_section "Тюнинг: RPS/RFS/XPS"
     cat > /usr/local/sbin/vps-rps-setup <<'RPS'
@@ -7418,6 +8359,13 @@ EOF
 # 14.4 — NIC tune + THP off + governor + irqbalance
 # =====================================================
 kt_apply_nic_misc() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     log_section "Тюнинг: NIC + THP + governor + irqbalance"
     apt install -y ethtool irqbalance >/dev/null 2>&1 || true
@@ -7482,6 +8430,13 @@ EOF
 # 14.5 — zram-swap (вместо дискового на слабых нодах)
 # =====================================================
 kt_setup_zram() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     log_section "Тюнинг: zram-swap"
     if ! modprobe zram 2>/dev/null; then
@@ -7530,6 +8485,13 @@ EOF
 # 14.6 — XanMod-ядро (BBRv3) — opt-in, требует reboot
 # =====================================================
 kt_install_xanmod() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     log_section "Тюнинг: XanMod-ядро (BBRv3)"
     if kt_is_container; then
@@ -7657,6 +8619,13 @@ kt_install_xanmod() {
 # 14.7 — статус тюнинга
 # =====================================================
 kt_status() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     echo "── Ядро / BBR ──"
     echo "  ядро:    $(uname -r)"
@@ -7689,6 +8658,13 @@ kt_status() {
 # 14.8 — откат тюнинга
 # =====================================================
 kt_rollback() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     read -e -p "Снять тюнинг ядра/сети (sysctl drop-in + юниты vps-*)? XanMod НЕ удаляется. (y/n): " _r
     [[ "$_r" == "y" ]] || { echo "Отменено."; return; }
@@ -7711,6 +8687,13 @@ kt_rollback() {
 }
 
 setup_kernel_tuning() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     while true; do
         print_header
         echo "╔══════════════════════════════════════════╗"
@@ -7774,6 +8757,13 @@ AD_NFT_FILE="$AD_CONF_DIR/vpsguard.nft"
 AD_STATE_DIR=/var/lib/vpsguard
 
 ad_ssh_client_ip() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local ip="${SSH_CONNECTION:-}"; ip="${ip%% *}"
     [ -z "$ip" ] && { ip="${SSH_CLIENT:-}"; ip="${ip%% *}"; }
     if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$ip" == *:* ]] && [ "$ip" != "127.0.0.1" ] && [ "$ip" != "::1" ]; then
@@ -7783,6 +8773,13 @@ ad_ssh_client_ip() {
 
 # Разбор whitelist-строки в v4/v6 списки (с валидацией — значение уходит в nft-heredoc)
 ad_parse_wl() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local in="$1" x
     AD_WL4=""; AD_WL6=""
     for x in ${in//,/ }; do
@@ -7796,6 +8793,13 @@ ad_parse_wl() {
 }
 
 ad_install() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     print_header
     echo "╔══════════════════════════════════════════╗"
     echo "║   Anti-DDoS: установка per-IP лимитов    ║"
@@ -8078,6 +9082,13 @@ EOF
 
 # ── 15.2 fleet-sync: ноды флота из Remnawave /api/nodes → nft-сет fleet_* ──
 ad_fleet_setup() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     print_header
     echo "╔══════════════════════════════════════════╗"
     echo "║   Anti-DDoS: fleet-sync (Remnawave)      ║"
@@ -8185,6 +9196,13 @@ EOF
 }
 
 ad_status() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     if ! nft list table inet vpsguard >/dev/null 2>&1; then
         rn_warn "Таблица vpsguard не загружена (anti-DDoS не установлен или снят)."
@@ -8203,6 +9221,13 @@ ad_status() {
 }
 
 ad_rollback() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     read -e -p "Снять anti-DDoS (таблица vpsguard + сервисы + fleet-sync)? (y/n): " _r
     [[ "$_r" == "y" ]] || { echo "Отменено."; return; }
@@ -8223,6 +9248,13 @@ ad_rollback() {
 }
 
 setup_antiddos() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     while true; do
         print_header
         echo "╔══════════════════════════════════════════╗"
@@ -8269,9 +9301,23 @@ TIB_DIR="/etc/threat-blocklist"
 TIB_LOG="/var/log/threat-blocklist-update.log"
 TIB_CRON_SCRIPT="/usr/local/bin/threat-blocklist-update.sh"
 
-tib_detect_trafficguard() { return 1; }  # TG выпилен — threat-block всегда в INPUT
+tib_detect_trafficguard() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+ return 1; }  # TG выпилен — threat-block всегда в INPUT
 
 tib_detect_crowdsec() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     if systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
         local cfg="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
         [ -f "$cfg" ] && grep -m1 "^mode:" "$cfg" 2>/dev/null | awk '{print $2}' | tr -d '"' || echo "iptables"
@@ -8281,6 +9327,13 @@ tib_detect_crowdsec() {
 }
 
 tib_print_env() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local cs_mode="$1"
     echo ""
     echo "  Обнаруженное окружение:"
@@ -8292,6 +9345,13 @@ tib_print_env() {
 # fetch_spamhaus_firehol <dir>: качает фиды в <dir>/threat-v4.cidr и threat-v6.cidr
 # (по одной CIDR на строку). Возвращает 1 если НИ ОДИН фид не скачался (fail-safe).
 tib_build_lists() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local dir="$1" tmp4 tmp6 got=0
     tmp4="$dir/threat-v4.cidr.tmp.$$"; tmp6="$dir/threat-v6.cidr.tmp.$$"
     : > "$tmp4"; : > "$tmp6"
@@ -8349,6 +9409,13 @@ tib_build_lists() {
 # Загрузка cidr-файла в ipset атомарно через swap (без дыры в защите).
 # tib_load_set <set_name> <family inet|inet6> <cidr_file>
 tib_load_set() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local set="$1" fam="$2" file="$3" tmp="${1}-tmp"
     ipset create "$set" hash:net family "$fam" maxelem 262144 -exist 2>/dev/null || true
     ipset destroy "$tmp" 2>/dev/null || true
@@ -8362,6 +9429,13 @@ tib_load_set() {
 }
 
 tib_install() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     log_section "Threat-Intel блоклист — установка (Spamhaus + FireHOL L1)"
 
@@ -8437,6 +9511,13 @@ tib_install() {
 }
 
 tib_create_update_script() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     cat > "$TIB_CRON_SCRIPT" <<'UPDATER'
 #!/usr/bin/env bash
 # Обновление Threat-Intel блоклиста (Spamhaus DROP + FireHOL L1).
@@ -8498,6 +9579,13 @@ UPDATER
 }
 
 tib_cron_setup() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     # Spamhaus/FireHOL обновляются часто; берём раз в 12ч (в :30 чтобы не совпасть с AS в 04:00)
     local cron_line="30 */12 * * * $TIB_CRON_SCRIPT >> $TIB_LOG 2>&1"
     ( crontab -l 2>/dev/null | grep -v "$TIB_CRON_SCRIPT"; echo "$cron_line" ) | crontab -
@@ -8505,6 +9593,13 @@ tib_cron_setup() {
 }
 
 tib_status() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     echo "── Threat-Intel блоклист ──"
     if ! ipset list threat-block-v4 &>/dev/null; then
@@ -8525,6 +9620,13 @@ tib_status() {
 }
 
 tib_remove() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     echo ""
     read -r -e -p "Удалить Threat-Intel (правила, IPSet и таймер)? (y/n): " _r
     [[ "$_r" == y ]] || { echo "Отменено."; return 0; }
@@ -8540,6 +9642,13 @@ tib_remove() {
 }
 
 setup_threat_blocklist() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     while true; do
         print_header
         echo "╔══════════════════════════════════════════╗"
@@ -8578,6 +9687,13 @@ setup_threat_blocklist() {
 # ── раннер шага: логирует, ловит код возврата, не роняет скрипт ──
 ONEBTN_RESULTS=()
 onebtn_step() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local name="$1"; shift
     echo ""
     echo "════════════════════════════════════════════════════════════"
@@ -8609,6 +9725,13 @@ onebtn_step() {
 }
 
 setup_one_button() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     print_header
     echo "╔══════════════════════════════════════════╗"
     echo "║   🚀 УСТАНОВИТЬ ВСЁ (полный prod-стек)   ║"
@@ -8730,6 +9853,13 @@ setup_one_button() {
 # Идемпотентно. НЕ трогает: твои ноды/remnanode, xray-конфиги, SSH-ключи.
 
 cleanup_legacy() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     print_header
     echo "╔══════════════════════════════════════════╗"
     echo "║   🧹 ПОЛНАЯ ВЫЧИСТКА (откат всего)       ║"
@@ -8890,6 +10020,13 @@ cleanup_legacy() {
 # БЕЗОПАСНЫЙ ТЕСТ CROWDSEC: preflight / install + полное логирование
 # =====================================
 cs_test_snapshot() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local dir="$1" phase="$2"
     mkdir -p "$dir/$phase" || return 1
     { date -Is; uname -a; cat /etc/os-release; } > "$dir/$phase/system.txt" 2>&1 || true
@@ -8902,6 +10039,13 @@ cs_test_snapshot() {
     { dpkg-query -W crowdsec crowdsec-firewall-bouncer-iptables ipset 2>&1 || true; } > "$dir/$phase/packages.txt"
 }
 cs_test_preflight() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local failures=0 pkg
     echo "===== CROWDSEC TEST PREFLIGHT ====="
     if (( EUID != 0 )); then echo "FAIL: требуется root"; failures=$((failures+1)); fi
@@ -8927,6 +10071,13 @@ cs_test_preflight() {
     echo "PREFLIGHT PASS"
 }
 cs_test_run() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local mode="$1" dir rc=0
     dir="/root/crowdsec-test-$(date +%Y%m%d-%H%M%S)-$$"
     mkdir -p "$dir" || return 1
@@ -8975,8 +10126,21 @@ fi
 # Self-contained C2 module: works with a private GitHub repo and without a second token.
 # The single-file launcher must not try to access private Contents after unset TOKEN.
 xtls_c2_write_embedded_module() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     cat <<'XTLS_C2_EMBEDDED_MODULE_END_2026'
 #!/usr/bin/env bash
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        exit 1
+    fi
 set -Eeuo pipefail
 umask 077
 TABLE=xtls_c2_feed
@@ -9174,6 +10338,13 @@ XTLS_C2_EMBEDDED_MODULE_END_2026
 }
 
 setup_c2_feed() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local file choice rc=0
     file=$(mktemp /tmp/xtls-c2-menu.XXXXXX.sh) || return 1
     chmod 600 "$file"
@@ -9217,6 +10388,13 @@ setup_c2_feed() {
 
 # Independent UDP monitor; no DROP and no unverified C2 port copying.
 xtls_udp_write_embedded_module() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
 cat <<'XTLS_UDP_EMBEDDED_END'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -9269,6 +10447,13 @@ status() {
   if [[ -f "$CSV" ]];then wc -l "$CSV";else echo 'Confirmed feed: none';fi
 }
 install_module() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   install -d -m 700 "$ROOT"
   prepare
   load
@@ -9296,6 +10481,13 @@ udp_drop_handle() {
  nft -a list chain ip "$TABLE" output 2>/dev/null | awk '/comment "xtls-udp-block"/ {for(i=1;i<=NF;i++) if($i=="handle") {print $(i+1); exit}}'
 }
 enable_block() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
   install -d -m 700 "$ROOT"
   [[ -s "$CSV" ]] || { echo 'Нет подтверждённых UDP IP:port; DROP не включён'; return 1; }
   prepare
@@ -9328,6 +10520,13 @@ esac
 XTLS_UDP_EMBEDDED_END
 }
 setup_udp_abuse() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local f choice rc=0
     f=$(mktemp /tmp/xtls-udp.XXXXXX.sh) || return 1
     chmod 600 "$f"
@@ -9355,8 +10554,21 @@ setup_udp_abuse() {
 
 # Unified management only: no migration or firewall changes.
 xtls_spamhaus_out_write_module() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     cat <<'XTLS_SPAMHAUS_OUTPUT_MODULE_END'
 #!/usr/bin/env bash
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        exit 1
+    fi
 set -Eeuo pipefail
 umask 077
 ROOT=/etc/xtls-spamhaus-output
@@ -9691,19 +10903,33 @@ esac
 XTLS_SPAMHAUS_OUTPUT_MODULE_END
 }
 spamhaus_udp_require_installed() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local target=/usr/local/sbin/xtls-spamhaus-udp
     [[ -f "$target" && ! -L "$target" ]] || { echo 'Сначала установите UDP-расширение'; return 1; }
-    printf '%s  %s\n' 3a9a538570385684e01514cb38f48937870780dae7f593983b3f6b6b55479f5a "$target" |
+    printf '%s  %s\n' b8ac3086a10081096777f5df52e027d6d97c3efd84024198fd4cf94859ea48c3 "$target" |
         sha256sum -c --status || { echo 'Неизвестная версия UDP-модуля: требуется ручная проверка'; return 1; }
 }
 
 spamhaus_udp_install() (
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     set -euo pipefail
     umask 077
     local target=/usr/local/sbin/xtls-spamhaus-udp
     local unit=/etc/systemd/system/xtls-spamhaus-udp-restore.service
     local config=/etc/xtls-spamhaus-udp work path
-    local base=https://raw.githubusercontent.com/djing1e/universal-vps-setup/0dbef9a93c7b9ff109bd584856e45dbe2807419e/modules
+    local base=https://raw.githubusercontent.com/djing1e/universal-vps-setup/df0124973ee0e30dd40aa85559b25d6328310878/modules
     nft list chain inet xtls_spamhaus_out output >/dev/null || return 1
     [[ "$(systemctl show --value --property=LoadState xtls-spamhaus-output-restore.service)" == loaded ]] || {
         echo 'Сначала установите Spamhaus OUTPUT Observe'; return 1;
@@ -9717,7 +10943,7 @@ spamhaus_udp_install() (
     curl -fsSL --connect-timeout 10 --max-time 60 "$base/xtls-spamhaus-udp.py" -o "$work/module.py" || return 1
     curl -fsSL --connect-timeout 10 --max-time 60 "$base/xtls-spamhaus-udp-restore.service" -o "$work/xtls-spamhaus-udp-restore.service" || return 1
     printf '%s  %s\n' \
-        3a9a538570385684e01514cb38f48937870780dae7f593983b3f6b6b55479f5a "$work/module.py" \
+        b8ac3086a10081096777f5df52e027d6d97c3efd84024198fd4cf94859ea48c3 "$work/module.py" \
         2395eb59df4a071216290710407605053493f6201933b35a6c0884194f078d3e "$work/xtls-spamhaus-udp-restore.service" | sha256sum -c - || return 1
     python3 -c 'import sys; compile(open(sys.argv[1], "rb").read(), sys.argv[1], "exec")' "$work/module.py" || return 1
     [[ ! -e "$target" ]] || cmp -s "$target" "$work/module.py" || { echo 'Неизвестный установленный UDP-модуль; замена отменена'; return 1; }
@@ -9736,6 +10962,13 @@ spamhaus_udp_install() (
 )
 
 spamhaus_udp_exemptions() (
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     set -euo pipefail
     local config=/etc/xtls-spamhaus-udp entries work
     [[ ! -L "$config" && ! -L "$config/exemptions.txt" && ! -L "$config/mode" ]] || {
@@ -9778,6 +11011,13 @@ PY
 
 
 spamhaus_udp_enable() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local answer mode
     spamhaus_udp_require_installed || return 1
     mode=$(cat /etc/xtls-spamhaus-udp/mode 2>/dev/null || echo observe)
@@ -9800,6 +11040,13 @@ spamhaus_udp_enable() {
 }
 
 spamhaus_udp_keep() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local answer
     spamhaus_udp_require_installed || return 1
     [[ "$(cat /etc/xtls-spamhaus-udp/mode 2>/dev/null || true)" == block ]] || {
@@ -9817,6 +11064,13 @@ spamhaus_udp_keep() {
 }
 
 setup_spamhaus_udp_drop() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local choice
     while true; do
         echo '=== UDP DROP по сетям Spamhaus ==='
@@ -9858,6 +11112,13 @@ spamhaus_output_summary() {
 }
 
 setup_spamhaus_out_observe() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local f choice rc=0
     f=$(mktemp /tmp/xtls-spamhaus-out.XXXXXX.sh) || return 1
     chmod 700 "$f"
@@ -9931,10 +11192,17 @@ guard_engine_menu_action() (
 )
 
 setup_auto_abuse_guard() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local choice installer
     installer=$(mktemp /tmp/xtls-auto-guard.XXXXXX.sh) || return 1
     chmod 700 "$installer"
-    if ! curl -fsSL --connect-timeout 10 --max-time 40 "https://raw.githubusercontent.com/djing1e/universal-vps-setup/b9d57bc8f252422ac6c51a7a9fc33e7407c18b9d/modules/xtls-auto-abuse-guard-install.sh" -o "$installer"; then
+    if ! curl -fsSL --connect-timeout 10 --max-time 40 "https://raw.githubusercontent.com/djing1e/universal-vps-setup/4f61821baf8423687ada76323df4ad9eb8327d2f/modules/xtls-auto-abuse-guard-install.sh" -o "$installer"; then
         rm -f "$installer"
         echo "Не удалось загрузить установщик Auto Abuse Guard"
         return 1
@@ -9973,10 +11241,17 @@ setup_auto_abuse_guard() {
 }
 
 setup_smtp25_guard() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local choice f
     f=$(mktemp /tmp/xtls-smtp25.XXXXXX.sh) || return 1
     chmod 700 "$f"
-    if ! curl -fsSL --connect-timeout 10 --max-time 40 "https://raw.githubusercontent.com/djing1e/universal-vps-setup/08d02d30789344b532aa260515c107ed93393b33/modules/xtls-smtp25-guard.sh" -o "$f"; then
+    if ! curl -fsSL --connect-timeout 10 --max-time 40 "https://raw.githubusercontent.com/djing1e/universal-vps-setup/df0124973ee0e30dd40aa85559b25d6328310878/modules/xtls-smtp25-guard.sh" -o "$f"; then
         rm -f "$f"; echo "Ошибка загрузки SMTP25 Guard"; return 1
     fi
     if ! bash -n "$f"; then rm -f "$f"; return 1; fi
@@ -10004,10 +11279,17 @@ setup_smtp25_guard() {
 }
 
 setup_portscan_observe() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local choice f
     f=$(mktemp /tmp/xtls-portscan.XXXXXX.sh) || return 1
     chmod 700 "$f"
-    if ! curl -fsSL --connect-timeout 10 --max-time 40 "https://raw.githubusercontent.com/djing1e/universal-vps-setup/08d02d30789344b532aa260515c107ed93393b33/modules/xtls-portscan-observe.sh" -o "$f"; then
+    if ! curl -fsSL --connect-timeout 10 --max-time 40 "https://raw.githubusercontent.com/djing1e/universal-vps-setup/df0124973ee0e30dd40aa85559b25d6328310878/modules/xtls-portscan-observe.sh" -o "$f"; then
         rm -f "$f"; echo "Ошибка загрузки Port Scan Observe"; return 1
     fi
     if ! bash -n "$f"; then rm -f "$f"; return 1; fi
@@ -10030,6 +11312,13 @@ setup_portscan_observe() {
 }
 
 setup_antiabuse_center() {
+    # Proxmox execution gate: no mutable profile override.
+    if [[ -e /etc/pve || -e /usr/bin/pveversion || $(uname -r) == *-pve ]] ||
+       [[ $(timeout 3 dpkg-query -W -f='${Status}' pve-manager 2>/dev/null || { _pve_probe_rc=$?; (( _pve_probe_rc == 1 )) || printf 'install ok installed'; }) == 'install ok installed' ]]; then
+        echo 'BLOCKED: Proxmox Host permits Audit and reviewed allowlisted plans only.' >&2
+        return 1
+    fi
+
     local choice
     while true; do
         echo ""
