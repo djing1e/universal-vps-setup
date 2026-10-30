@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-SCRIPT_URL="https://raw.githubusercontent.com/djing1e/universal-vps-setup/5f7e6ed977d48054ca01f38a152900f48896aa54/modules/xtls-auto-abuse-guard.py"
+SCRIPT_URL="https://raw.githubusercontent.com/djing1e/universal-vps-setup/6ed036bf1e09dd964bb28c1911af80380bc782ce/modules/xtls-auto-abuse-guard.py"
 TARGET=/usr/local/sbin/xtls-auto-abuse-guard
 SERVICE=/etc/systemd/system/xtls-auto-abuse-guard.service
 TIMER=/etc/systemd/system/xtls-auto-abuse-guard.timer
