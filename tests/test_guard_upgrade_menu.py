@@ -1,6 +1,5 @@
 """Exercise the actual Bash menu wrapper with pinned fixture downloads/fake updater."""
 import json
-import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -21,19 +20,14 @@ class GuardMenuTests(unittest.TestCase):
                       FIXTURE_ROOT=str(ROOT),CALLS=str(self.calls))
         self.source='guard_engine_menu_action() ('+SOURCE.split('guard_engine_menu_action() (',1)[1].split('setup_auto_abuse_guard() {',1)[0]
         self.source=self.source.replace('/tmp/xtls-guard-upgrade.',str(self.root/'bundle.'))
-        # Production intentionally pins the older reviewed bundle. This isolated
-        # wrapper test supplies the current local helper as its download fixture.
-        self.source=self.source.replace(
-            'a182c62db4cd8fd6f6e364d992d468ce2a2647724acf0e7444de41c205824ed9',
-            hashlib.sha256((ROOT/'lib/vps_inventory.py').read_bytes()).hexdigest())
         self.tool('curl', '''from pathlib import Path
 if os.environ.get('FAIL_DOWNLOAD'): sys.exit(22)
 url=sys.argv[-3];name=url.split('/')[-1]
-source=('modules/' if name=='xtls-auto-abuse-guard.py' else 'lib/')+name
+source=('modules/' if name in ('xtls-auto-abuse-guard.py','xtls-auto-abuse-guard.service','xtls-auto-abuse-guard.timer') else 'lib/')+name
 raw=(Path(os.environ['FIXTURE_ROOT'])/source).read_bytes()
 Path(sys.argv[-1]).write_bytes(b'corrupt' if os.environ.get('CORRUPT') else raw)
 ''')
-        self.tool('python3', '''if len(sys.argv)>2 and sys.argv[1].endswith('guard_engine_upgrade.py'):
+        self.tool('python3', '''if len(sys.argv)>2 and sys.argv[1].endswith(('guard_engine_upgrade.py','guard_managed_install.py')):
     action=sys.argv[2]
     with open(os.environ['CALLS'],'a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')
     if action=='check':
@@ -115,16 +109,30 @@ os.execv(sys.executable,[sys.executable]+sys.argv[1:])
         self.assertNotEqual(result.returncode,0)
         self.assertEqual(self.actions(),[])
 
-    def test_menu_routes_five_and_six_without_install(self):
+    def test_managed_install_requires_distinct_confirmation(self):
+        result=self.run_action('install','INSTALL-GUARD-OBSERVE\n',CHECK_STATUS='ready_fresh_install')
+        self.assertEqual(result.returncode,0,result.stderr)
+        check,install=self.actions()
+        self.assertTrue(check[0].endswith('guard_managed_install.py'))
+        self.assertEqual(install[1],'install')
+        self.assertEqual(install[-2:],['--confirm','INSTALL-GUARD-OBSERVE'])
+        self.assertIn('--bundle',install)
+
+    def test_install_does_not_accept_update_confirmation(self):
+        result=self.run_action('install','UPDATE-GUARD-ENGINE\n',CHECK_STATUS='ready_register_existing')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual([r[1] for r in self.actions()],['check'])
+
+    def test_menu_routes_managed_install_and_updates_without_legacy_install(self):
         menu='setup_auto_abuse_guard() {'+SOURCE.split('setup_auto_abuse_guard() {',1)[1].split('setup_smtp25_guard() {',1)[0]
         # Isolate the existing installer download used when opening the menu.
         menu=menu.replace('/tmp/xtls-auto-guard.',str(self.root/'installer.'))
         self.tool('curl', 'from pathlib import Path\nPath(sys.argv[-1]).write_text("#!/bin/bash\\nexit 99\\n")\n')
         override='\nguard_engine_menu_action() { echo "$1" >> "$CALLS"; }\n'
         result=subprocess.run(['bash','-c','set -euo pipefail\n'+menu+override+'\nsetup_auto_abuse_guard'],
-                              input='5\n6\n0\n',text=True,capture_output=True,env=self.env)
+                              input='1\n5\n6\n0\n',text=True,capture_output=True,env=self.env)
         self.assertEqual(result.returncode,0,result.stderr)
-        self.assertEqual(self.calls.read_text().splitlines(),['check','apply'])
+        self.assertEqual(self.calls.read_text().splitlines(),['install','check','apply'])
         self.assertFalse(list(self.root.glob('installer.*')))
 
 
