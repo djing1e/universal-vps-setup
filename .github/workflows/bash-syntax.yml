@@ -35,7 +35,7 @@ jobs:
         shell: bash
         run: |
           bash -n modules/xtls-auto-abuse-guard-install.sh
-          python3 -m py_compile modules/xtls-auto-abuse-guard.py
+          python3 -m py_compile modules/xtls-auto-abuse-guard.py modules/xtls-spamhaus-udp.py
           sudo python3 -m unittest discover -s tests -v
       - name: Real nftables conntrack direction and migration
         shell: bash
@@ -47,5 +47,7 @@ jobs:
           sudo ip netns add "$ns"
           sudo ip -n "$ns" link set lo up
           sudo ip netns exec "$ns" python3 tests/check_spamhaus_direction.py
+          sudo ip netns exec "$ns" nft delete table inet xtls_spamhaus_out
+          sudo ip netns exec "$ns" python3 tests/check_spamhaus_udp_real.py
       - name: C2 real nftables regression tests in a network namespace
         run: sudo python3 tests/check_c2_real_nft.py
