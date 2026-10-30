@@ -23,8 +23,15 @@ with tempfile.TemporaryDirectory() as directory:
     def enable():
         subprocess.run(['bash', str(script), 'diagnostics-enable'], check=True)
     enable()
-    # Simulate an older installation and a duplicate diagnostic rule.
+    original_counters = {
+        item['rule']['comment']: item['rule']
+        for item in json.loads(nft('-j', '-a', 'list', 'chain', 'inet', 'xtls_spamhaus_out', 'output'))['nftables']
+        if item.get('rule', {}).get('comment') in ('xtls-sh-out-v4', 'xtls-sh-out-v6')
+    }
+    # Simulate duplicate observation counters as well as legacy diagnostics.
     for version,family in [(4,'ip'),(6,'ip6')]:
+        nft('add','rule','inet','xtls_spamhaus_out','output',family,'daddr',f'@v{version}',
+            'counter','comment',f'"xtls-sh-out-v{version}"')
         nft('add','rule','inet','xtls_spamhaus_out','output',family,'daddr',f'@v{version}',
             'log','prefix',f'"XTLS-SH{version} "','comment',f'"xtls-sh-diag-v{version}"')
     enable()
@@ -33,6 +40,10 @@ with tempfile.TemporaryDirectory() as directory:
     for version in (4,6):
         own=[line for line in rules.splitlines() if f'comment "xtls-sh-diag-v{version}"' in line]
         assert len(own)==1 and 'ct direction original' in own[0], rules
+    counter_rows = [item['rule'] for item in json.loads(nft('-j', '-a', 'list', 'chain', 'inet', 'xtls_spamhaus_out', 'output'))['nftables']
+                    if item.get('rule', {}).get('comment') in original_counters]
+    assert len(counter_rows) == 2, counter_rows
+    assert all(row == original_counters[row['comment']] for row in counter_rows), counter_rows
     assert ' drop' not in rules
     for version,family,address,af in [(4,'ip','127.0.0.1',socket.AF_INET),
                                       (6,'ip6','::1',socket.AF_INET6)]:

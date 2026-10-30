@@ -1,0 +1,14 @@
+[Unit]
+Description=Restore opt-in Spamhaus UDP OUTPUT DROP
+Requires=xtls-spamhaus-output-restore.service
+After=xtls-spamhaus-output-restore.service
+Before=network.target
+ConditionPathExists=/usr/local/sbin/xtls-spamhaus-udp
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/sbin/xtls-spamhaus-udp restore
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
