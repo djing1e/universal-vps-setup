@@ -47,7 +47,7 @@ class UpgradeTests(unittest.TestCase):
 
     def runner(self, argv, timeout):
         self.assertEqual(argv[0],'systemctl')
-        self.assertIn(argv[1],('show','start','stop'))
+        self.assertIn(argv[1],('show','start','stop','reset-failed'))
         self.assertTrue(any(name in argv for name in (upgrade.SERVICE,upgrade.TIMER)))
         self.calls.append(argv)
         action=argv[1]
@@ -55,6 +55,8 @@ class UpgradeTests(unittest.TestCase):
         if action=='show':
             fields={'Result':'success','ExecMainStatus':'0'} if '--property=Result,ExecMainStatus' in argv else self.states[name]
             return {'status':'ok','output':'\n'.join(k+'='+v for k,v in fields.items())}
+        if action=='reset-failed':
+            return {'status':'ok','output':''}
         if action=='stop' and self.fail_stop:
             self.fail_stop=False
             return {'status':'error'}
@@ -243,6 +245,32 @@ class UpgradeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'unsupported or unknown OS'):
             self.guard.apply(self.candidate)
         self.assertEqual(self.calls, [])
+
+    def test_exhausted_start_budget_is_reset_for_candidate_and_rollback(self):
+        original=self.guard.runner
+        budget={'starts':5}
+        def runner(argv, timeout):
+            if argv==['systemctl','reset-failed',upgrade.SERVICE]:
+                budget['starts']=0
+            if argv==['systemctl','start',upgrade.SERVICE]:
+                budget['starts']+=1
+                if budget['starts']>1: return {'status':'error'}
+            return original(argv, timeout)
+        self.guard.runner=runner
+        self.fail_scan=True
+        with self.assertRaisesRegex(RuntimeError,'old engine and timer restored'):
+            self.guard.apply(self.candidate)
+        resets=[c for c in self.calls if c[1]=='reset-failed']
+        self.assertEqual(resets,[['systemctl','reset-failed',upgrade.SERVICE]]*2)
+        self.assertEqual(self.engine.read_bytes(),self.old)
+        self.assertEqual(self.records()[0]['status'],'rolled_back')
+        self.assertEqual(self.states[upgrade.TIMER]['ActiveState'],'active')
+
+    def test_preexisting_failed_service_is_still_refused_without_reset(self):
+        self.states[upgrade.SERVICE]['ActiveState']='failed'
+        with self.assertRaises(ValueError):self.guard.apply(self.candidate)
+        self.assertTrue(all(c[1]=='show' for c in self.calls))
+        self.assertFalse(self.guard.backups.exists())
 
     def test_policy_matches_release_engine_and_installer_units(self):
         policy=json.loads((ROOT/'lib/guard_engine_policy.json').read_text())

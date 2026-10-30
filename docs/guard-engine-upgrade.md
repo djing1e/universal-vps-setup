@@ -78,3 +78,11 @@ an archived pending record; it is not falsely relabeled committed. SIGKILL of th
 fixture itself or host power loss can prevent finally cleanup and require manual
 recovery from those artifacts. The fixture never calls Docker, firewall or network
 configuration commands.
+
+Before verification scans of a candidate or restored engine, the transaction runs
+systemctl reset-failed for xtls-auto-abuse-guard.service only. This clears that
+unit's failure/start-rate counter so a failed candidate cannot exhaust the old
+engine's restart budget during rollback. The unit's configured rate limits are
+unchanged. Preflight still refuses an already failed service; check/noop do not
+reset failures or start anything. Repeated disposable-VM scans exposed this case
+through real systemd's "Start request repeated too quickly" diagnostic.

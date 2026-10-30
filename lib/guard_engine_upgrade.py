@@ -123,6 +123,9 @@ class Upgrade:
                 'verification':'service_scan' if states[TIMER]['ActiveState']=='active' else 'static_only'}, raw, current, unit_bytes
 
     def verify_scan(self):
+        # A failed candidate can exhaust systemd's start budget. Clear only this
+        # observer's failure/start-limit before testing either engine.
+        self.command('reset-failed', SERVICE)
         self.command('start', SERVICE)
         result = self.command('show','--no-pager',SERVICE,'--property=Result,ExecMainStatus')
         values = dict(line.split('=',1) for line in result.splitlines() if '=' in line)
