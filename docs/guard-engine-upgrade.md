@@ -56,3 +56,25 @@ No guarantee of automatic recovery across power loss is made.
 Docker, Remnanode/Xray, web servers, databases, DNS, SSH, routes, firewall rules,
 installed units, timer enablement and persistent Guard configuration are not targets.
 This stage is CLI-only; the main menu and planner's apply_available=false stay unchanged.
+
+## Disposable VM integration
+
+`tests/run_guard_upgrade_systemd.py` is a separate explicit fixture for a disposable
+vm1-xtlspro with real systemd as PID 1, no active Docker/Remnanode and no Remnanode
+paths. It requires `--confirm TEST-VM-GUARD-UPGRADE` and a current enabled/active Guard
+installation. Never run this on a production node. This fixture actually changes
+the Guard executable and temporarily disables its timer in the disabled-state case.
+
+The fixture uses in-memory test policy hashes: two copies of the current observer
+with different comments force a replacement, and a separate Python candidate exits
+73 to test rollback through real systemd. The production policy file is unchanged.
+A forked updater exits immediately after stopping the real timer to exercise the
+pending transaction gate; this is a process-interruption checkpoint, not a power-loss
+or filesystem-durability test. Success, rollback, disabled/inactive and interrupted
+transaction scenarios print separate PASS lines. A finally block restores the
+original engine, verifies unchanged units and restores enabled/active timer state.
+Artifacts remain in a private /root/xtls-guard-systemd-test.* directory, including
+an archived pending record; it is not falsely relabeled committed. SIGKILL of the
+fixture itself or host power loss can prevent finally cleanup and require manual
+recovery from those artifacts. The fixture never calls Docker, firewall or network
+configuration commands.
