@@ -2507,7 +2507,7 @@ show_blocklists_status() {
         echo "  v4 сетей: $(ipset list asn-blacklist-v4 2>/dev/null | awk '/Number of entries/{print $4}')   v6: $(ipset list asn-blacklist-v6 2>/dev/null | awk '/Number of entries/{print $4}')"
         iptables-save 2>/dev/null | grep -c asn-blacklist | xargs echo "  правил в iptables:"
     else
-        echo "  не установлен (пункт 12)"
+        echo "  не установлен (Защита → AS-списки)"
     fi
     echo ""
     echo "── Threat-Intel (Spamhaus + FireHOL L1) ──"
@@ -2515,7 +2515,7 @@ show_blocklists_status() {
         echo "  v4 сетей: $(ipset list threat-block-v4 2>/dev/null | awk '/Number of entries/{print $4}')   v6: $(ipset list threat-block-v6 2>/dev/null | awk '/Number of entries/{print $4}')"
         iptables-save 2>/dev/null | grep -c threat-block | xargs echo "  правил в iptables:"
     else
-        echo "  не установлен (пункт 16)"
+        echo "  не установлен (Защита → Anti-Abuse)"
     fi
 }
 
@@ -4951,7 +4951,7 @@ rn_node_logging() {
   echo "╚══════════════════════════════════════════╝"
   echo ""
   echo "  Дописывает логирование в существующую ноду."
-  echo "  (Docker и зеркала ставятся в пункте 1 → 8 «Docker + зеркала».)"
+  echo "  (Docker и зеркала ставятся в разделе «Установка компонентов → Docker».)"
   echo ""
   echo "  Будет выполнено (по шагам, с подтверждением):"
   echo "    1. Патч docker-compose.yml: volume /var/log/remnanode"
@@ -8878,7 +8878,7 @@ cleanup_legacy() {
     log "=== [CLEANUP] КОНЕЦ полной вычистки ==="
     echo ""
     rn_success "Вычистка завершена. Фаервол в голом состоянии."
-    rn_info "Теперь можно ставить начисто: пункт 0 (одна кнопка) или модули по отдельности."
+    rn_info "Теперь можно ставить начисто: раздел «Установка компонентов»."
     echo ""
     echo "  Проверка чистоты:"
     echo "    ipset list -n            (не должно быть asn/threat/SCANNERS/crowdsec)"
@@ -9866,7 +9866,7 @@ setup_spamhaus_out_observe() {
     while true; do
         rc=0
         echo "=== Spamhaus: сети и журнал совпадений ==="
-        echo "Журналирование не меняет режим UDP DROP (управление: 16 → 3)."
+        echo "Журналирование не меняет режим UDP DROP (управление: Защита → Anti-Abuse → 3)."
         echo "1) Установить / обновить Spamhaus OUTPUT (режим UDP сохраняется)"
         echo "2) Обновить фид сейчас"
         echo "3) Статус и счётчики"
@@ -9939,7 +9939,7 @@ guard_engine_menu_action() (
         *) echo 'Проверка не разрешила действие'; return 1 ;;
     esac
     if [[ "$action" == check ]]; then
-        echo 'Доступно обновление движка. Для применения выберите пункт 6.'
+        echo 'Доступно обновление движка. Применение: «Обновления → Guard: обновить» или пункт 6 в меню Guard.'
         return 0
     fi
     if [[ "$action" == install ]]; then
@@ -10065,12 +10065,17 @@ setup_antiabuse_center() {
     local choice
     while true; do
         echo ""
-        echo "=== Anti-Abuse & Threat Intelligence ==="
-        echo "  1) Spamhaus + FireHOL L1 (INPUT)"
+        echo "=== VPS / Защита / Anti-Abuse ==="
+        echo "  ВХОДЯЩИЕ ПОДКЛЮЧЕНИЯ"
+        echo "  1) Spamhaus + FireHOL: блокировать источники из списков"
+        echo ""
+        echo "  ИСХОДЯЩИЙ ТРАФИК НОДЫ"
         echo "  2) TCP DROP — C2 IP:порт"
         echo "  3) UDP DROP — сети Spamhaus"
-        echo "  4) Общий статус (только чтение)"
+        echo "  4) Все защиты: статус и счётчики (без изменений)"
         echo "  5) Spamhaus — обновление сетей и журнал совпадений"
+        echo ""
+        echo "  АНАЛИЗ И ДОПОЛНИТЕЛЬНЫЕ ЗАЩИТЫ"
         echo "  6) Анализ подписок — Auto Abuse Guard (без автобана)"
         echo "  7) SMTP25 Guard (опциональная исходящая защита)"
         echo "  8) Port Scan Guard (Observe)"
@@ -10145,107 +10150,205 @@ antiabuse_center_status() {
 }
 
 # =====================================
-# ГЛАВНОЕ МЕНЮ
+# НАВИГАЦИЯ VPS MANAGER
 # =====================================
-# Инициализация лога
-mkdir -p "$(dirname $LOG_FILE)"
-log "=== Запуск vps-setup.sh ==="
+# Rows are fixed application data: key|label|page/action|function|argument.
+# Never evaluate terminal input as code or use it as a function name.
+vps_menu() {
+    local title="$1" hint="$2" row key label kind callback argument choice found rc
+    shift 2
+    local -a rows=("$@")
+    while true; do
+        print_header
+        printf '%s\n\n' "$title"
+        printf '%s\n\n' "$hint"
+        for row in "${rows[@]}"; do
+            IFS='|' read -r key label kind callback argument <<< "$row"
+            printf '  %2s) %s\n' "$key" "$label"
+        done
+        if [[ "$title" == 'VPS / Главное меню' ]]; then
+            echo '   0) Выход'
+        else
+            echo '   0) Назад'
+        fi
+        echo
+        read -e -r -p 'Выбор: ' choice || return 0
+        [[ "$choice" == 0 ]] && return 0
+        found=0
+        for row in "${rows[@]}"; do
+            IFS='|' read -r key label kind callback argument <<< "$row"
+            [[ "$choice" == "$key" ]] || continue
+            found=1
+            rc=0
+            if [[ -n "$argument" ]]; then
+                "$callback" "$argument" || rc=$?
+            else
+                "$callback" || rc=$?
+            fi
+            if [[ "$kind" == action ]]; then
+                [[ "$rc" == 0 ]] || printf '\nДействие завершилось с кодом %s. Проверьте сообщения выше.\n' "$rc"
+                read -e -r -p 'Enter — вернуться в раздел…' choice || return 0
+            fi
+            break
+        done
+        if [[ "$found" == 0 ]]; then
+            echo 'Такого пункта нет. Выберите номер из текущего меню.'
+            read -e -r -p 'Enter — продолжить…' choice || return 0
+        fi
+    done
+}
 
-while true; do
-    print_header
-    echo " 00) 🚀 УСТАНОВИТЬ ВСЁ (полный prod-стек, одна кнопка)"
-    echo "     база+тюнинг+XanMod+CrowdSec+AS+Threat+vpsguard"
-    echo ""
-    echo "  1) Базовая настройка сервера"
-    echo "     SSH, UFW, sysctl, BBR, fail2ban, автообновления"
-    echo ""
-    echo "  2) Управление IPv6"
-    echo "     включить / отключить"
-    echo ""
-    echo "  3) CrowdSec (поведенческий IPS)"
-    echo "     установить / удалить / статус"
-    echo ""
-    echo "  4) NextDNS"
-    echo "     включить / отключить DoT через systemd-resolved"
-    echo ""
-    echo "  5) Журнал атак"
-    echo "     SSH брутфорс, fail2ban, CrowdSec"
-    echo ""
-    echo "  6) Статус системы"
-    echo ""
-    echo "  7) Лог действий скрипта"
-    echo "     $LOG_FILE"
-    echo ""
-    echo "  8) GeoBlock"
-    echo "     блокировка по странам (whitelist)"
-    echo ""
-    echo "  9) Swap"
-    echo "     создать / удалить / настроить"
-    echo ""
-    echo " 10) Установка remnanode"
-    echo "     встроенный / eGamesAPI / классический (docs.rw)"
-    echo ""
-    echo " 11) Шейпер скорости"
-    echo "     ограничение скорости пользователей (tc/nft)"
-    echo ""
-    echo " 12) AS_Network_List — блокировка госсетей РФ"
-    echo "     iptables/ipset + systemd timer; nftables + cron"
-    echo ""
-    echo " 13) WARP-native (Cloudflare WARP)"
-    echo "     wgcf-туннель для обхода geo-блоков (Gemini и т.п.)"
-    echo "     локально или по SSH на выбранную ноду"
-    echo ""
-    echo " 14) Тюнинг ядра/сети — RPS/conntrack/sysctl/BBR"
-    echo "     потолок юзеров и PPS; не трогает фаервол"
-    echo ""
-    echo " 15) Anti-DDoS — nft per-IP лимиты + fleet-sync"
-    echo "     поверх UFW/CrowdSec: SYN/UDP-флуд, connlimit"
-    echo ""
-    echo " 16) Anti-Abuse & Threat Intelligence — Spamhaus / TCP C2 / UDP"
-    echo "     единый раздел управления и общий статус"
-    echo ""
-    echo " 17) Probe-сервер — доступность IP снаружи/из РФ"
-    echo "     временный HTTP/HTTPS на своих портах, лог подключений;"
-    echo "     проверить новый IP на блок ДО того как вешать домен"
-    echo ""
-    echo " 18) TCP C2 Anti-Abuse — прямой вход (также в п.16)"
-    echo "     обновление раз в 6 часов; блокировка включается вручную"
-    echo ""
-    echo " 19) UDP Anti-Abuse — прямой вход (также в п.16)"
-    echo ""
-    echo "  W) 🧹 Полная вычистка (откат всего начисто)"
-    echo "     снести все слои перед чистым накатом"
-    echo ""
-    echo "  0) Выход"
-    echo ""
-    read -e -p "Выберите действие [00=всё / 0-19 / W=вычистка]: " MAIN_CHOICE
-
-    case $MAIN_CHOICE in
-        00|s|S|star|"*"|★) setup_one_button ;;
-        1) setup_base ;;
-        2) setup_ipv6 ;;
-        3) setup_crowdsec ;;
-        4) setup_nextdns ;;
-        5) show_security_log ;;
-        6) show_system_status ;;
-        7) show_script_log ;;
-        8) setup_geoblock ;;
-        9) setup_swap ;;
-       10) setup_remnanode ;;
-       11) setup_speed_shaper ;;
-       12) setup_as_blacklist ;;
-       13) setup_warp ;;
-       14) setup_kernel_tuning ;;
-       15) setup_antiddos ;;
-       16) setup_antiabuse_center ;;
-       17) setup_probe_server ;;
-       18) setup_c2_feed ;;
-       19) setup_udp_abuse ;;
-        W|w|wipe|WIPE) cleanup_legacy ;;
-        0) log "=== Выход из vps-setup.sh ==="; echo "Выход."; exit 0 ;;
-        *) echo "Неверный выбор." ;;
+# This is a preview of ONE existing operation, not a dependency planner.
+# Existing component dialogs keep their confirmations and validation.
+vps_install_entry() {
+    local component="$1" title details callback answer
+    case "$component" in
+        packages) title='Обновление системных пакетов'; callback=do_update_packages
+            details='APT может обновить установленные пакеты и перезапустить их службы. Это не обновление модулей менеджера.' ;;
+        ssh) title='Настройка SSH'; callback=do_ssh_setup
+            details="Изменяет ключ и порт SSH (по умолчанию ${DEFAULT_SSH_PORT}). Проверьте доступ через консоль провайдера." ;;
+        ufw) title='Настройка UFW'; callback=do_ufw_setup
+            details='Изменяет входящие правила firewall. На работающей ноде сначала проверьте порты сервисов.' ;;
+        autoupdates) title='Автообновления Debian / Ubuntu'; callback=do_autoupgrade
+            details='Изменяет настройки автоматического обновления системных пакетов.' ;;
+        fail2ban) title='Защита SSH: fail2ban'; callback=do_fail2ban
+            details='Устанавливает и настраивает fail2ban. Может включить блокировку источников SSH-атак.' ;;
+        docker) title='Docker и зеркала'; callback=do_docker_mirrors
+            details='Открывает настройку Docker и зеркал. Это установка/настройка, а не безопасное обновление работающих контейнеров.' ;;
+        nextdns) title='DNS через NextDNS'; callback=setup_nextdns
+            details='Далее: профиль и DoT / DoH. Применение изменит системный DNS.' ;;
+        crowdsec) title='Защита CrowdSec'; callback=setup_crowdsec
+            details='Далее: установка, состояние или удаление. Установка настраивает службы защиты и firewall bouncer.' ;;
+        antiddos) title='Защита от флуда: vpsguard'; callback=setup_antiddos
+            details='Далее: порты и лимиты. Применение изменит собственную таблицу nftables vpsguard.' ;;
+        antiabuse) title='Защита от злоупотреблений'; callback=setup_antiabuse_center
+            details='Выберите нужную защиту: входящие списки, TCP C2, UDP Spamhaus или анализ подписок. DROP включается отдельно.' ;;
+        remnanode) title='Нода Remnanode'; callback=setup_remnanode
+            details='Далее: способ установки и параметры. Установка может изменить Docker и конфигурацию ноды; для работающей ноды сначала проверьте текущую установку.' ;;
+        swap) title='Файл подкачки'; callback=setup_swap
+            details='Далее: создание, настройка или удаление swap.' ;;
+        kernel) title='Тюнинг сети и ядра'; callback=setup_kernel_tuning
+            details='Далее: sysctl, BBR, RPS и conntrack. XanMod меняет ядро и требует перезагрузки; выбирается отдельно в этом разделе.' ;;
+        *) echo 'Неизвестный компонент'; return 1 ;;
     esac
+    print_header
+    printf 'VPS / %s\n\n%s\n\n' "$title" "$details"
+    echo 'Будет открыт только выбранный компонент. Другие компоненты не запускаются.'
+    echo 'Повторный запуск старых установщиков может изменить существующие настройки.'
+    echo
+    echo '  1) Продолжить к выбранному компоненту'
+    echo '  0) Назад'
+    read -e -r -p 'Выбор: ' answer || return 0
+    case "$answer" in
+        1) "$callback" ;;
+        0) return 0 ;;
+        *) echo 'Переход отменён: выберите 1 или 0.' ;;
+    esac
+}
 
-    echo ""
-    read -e -p "Нажмите Enter для возврата в меню..."
-done
+vps_base_menu() {
+    vps_menu 'VPS / Установка / Базовые компоненты' \
+        'Выберите одну задачу. Настройки SSH, firewall и ядра не применяются пакетом.' \
+        '1|Системные пакеты: обновить|action|vps_install_entry|packages' \
+        '2|SSH: ключ и порт|action|vps_install_entry|ssh' \
+        '3|Firewall UFW: входящие порты|action|vps_install_entry|ufw' \
+        '4|Защита SSH: fail2ban|action|vps_install_entry|fail2ban' \
+        '5|Автообновления ОС|action|vps_install_entry|autoupdates'
+}
+
+vps_install_menu() {
+    vps_menu 'VPS / Установка компонентов' \
+        'Выберите компонент. Сначала покажем, что он изменяет, затем откроем его настройки.' \
+        '1|База: пакеты, SSH, UFW, fail2ban|page|vps_base_menu|' \
+        '2|NextDNS: системный DNS через DoT / DoH|action|vps_install_entry|nextdns' \
+        '3|CrowdSec: защита от атак|action|vps_install_entry|crowdsec' \
+        '4|Anti-DDoS: лимиты входящих соединений|action|vps_install_entry|antiddos' \
+        '5|Anti-Abuse: TCP C2, UDP, Spamhaus, анализ подписок|action|vps_install_entry|antiabuse' \
+        '6|Remnanode: установка VPN-ноды|action|vps_install_entry|remnanode' \
+        '7|Docker: установка и зеркала|action|vps_install_entry|docker' \
+        '8|Swap: файл подкачки|action|vps_install_entry|swap'
+}
+
+vps_security_menu() {
+    vps_menu 'VPS / Защита сервера' \
+        'Каждый раздел содержит собственные настройки и проверку состояния.' \
+        '1|Anti-Abuse: TCP / UDP DROP и анализ подписок|page|setup_antiabuse_center|' \
+        '2|CrowdSec: атаки и блокировки|action|setup_crowdsec|' \
+        '3|Anti-DDoS: лимиты соединений и флуда|action|setup_antiddos|' \
+        '4|AS-списки: блокировка входящих по сетям|action|setup_as_blacklist|' \
+        '5|GeoBlock: доступ по странам|action|setup_geoblock|' \
+        '6|UFW: входящие порты|action|vps_install_entry|ufw' \
+        '7|fail2ban: защита SSH|action|vps_install_entry|fail2ban'
+}
+
+vps_network_menu() {
+    vps_menu 'VPS / Сеть и ресурсы' \
+        'DNS, маршруты и сетевые параметры могут влиять на доступность сервера.' \
+        '1|NextDNS: DNS, профиль, DoT / DoH|action|setup_nextdns|' \
+        '2|IPv6: включить / отключить|action|setup_ipv6|' \
+        '3|Сеть и ядро: BBR, RPS, conntrack, XanMod|action|vps_install_entry|kernel' \
+        '4|WARP: исходящий туннель|action|setup_warp|' \
+        '5|Swap: файл подкачки|action|setup_swap|'
+}
+
+vps_node_menu() {
+    vps_menu 'VPS / VPN-нода и подключения' \
+        'Remnanode, Docker и сетевые инструменты ноды.' \
+        '1|Remnanode: способы установки|action|vps_install_entry|remnanode' \
+        '2|Docker: установка и зеркала|action|vps_install_entry|docker' \
+        '3|Шейпер: ограничения скорости|action|setup_speed_shaper|' \
+        '4|Проверка IP извне: временный probe-сервер|action|setup_probe_server|'
+}
+
+vps_diagnostics_menu() {
+    vps_menu 'VPS / Статус и журналы' \
+        'Просмотр состояния и журналов. Установка и включение блокировок здесь не запускаются.' \
+        '1|Система: SSH, firewall, службы, ресурсы|action|show_system_status|' \
+        '2|Защиты Anti-Abuse: режимы и счётчики|action|antiabuse_center_status|' \
+        '3|Журнал атак: SSH, fail2ban, CrowdSec|action|show_security_log|' \
+        '4|Журнал действий менеджера|action|show_script_log|'
+}
+
+vps_updates_menu() {
+    vps_menu 'VPS / Обновления' \
+        'Обновление с резервной копией и откатом доступно для движка Guard. Общего обновления всех компонентов пока нет.' \
+        '1|Guard: проверить обновление, без изменений|action|guard_engine_menu_action|check' \
+        '2|Guard: обновить движок с резервной копией и откатом|action|guard_engine_menu_action|apply' \
+        '3|Пакеты ОС: обновить через APT (возможен перезапуск служб)|action|vps_install_entry|packages' \
+        '4|Автообновления ОС: настроить|action|vps_install_entry|autoupdates'
+}
+
+vps_advanced_menu() {
+    vps_menu 'VPS / Дополнительно' \
+        'Старые комплексные сценарии предназначены для отдельной подготовки сервера. Проверяйте их состав перед запуском.' \
+        '1|Подготовка РФ-ноды: APT-зеркала и Docker|action|vps_prepare_ru_entry|' \
+        '8|Старый сценарий: полный стек, включая SSH, firewall и XanMod|action|setup_one_button|' \
+        '9|Полная очистка: удаление установленных слоёв|action|cleanup_legacy|'
+}
+
+vps_prepare_ru_entry() {
+    local answer
+    echo 'Изменит APT-зеркала и установку Docker. Проверьте работающие сервисы.'
+    read -e -r -p 'Введите PREPARE-RU для продолжения: ' answer || return 0
+    [[ "$answer" == PREPARE-RU ]] || { echo 'Отменено'; return 0; }
+    prepare_ru_node && prepare_ru_docker
+}
+
+vps_main_menu() {
+    vps_menu 'VPS / Главное меню' \
+        'Начальная настройка — пункт 1. Состояние сервера — пункт 5. Выход из любого раздела — 0.' \
+        '1|Установить и настроить компоненты|page|vps_install_menu|' \
+        '2|Защита: firewall, Anti-DDoS, Anti-Abuse|page|vps_security_menu|' \
+        '3|Сеть и ресурсы: DNS, IPv6, BBR, Swap|page|vps_network_menu|' \
+        '4|VPN-нода: Remnanode, Docker, шейпер|page|vps_node_menu|' \
+        '5|Проверить сервер: статус и журналы|page|vps_diagnostics_menu|' \
+        '6|Обновления: Guard и пакеты ОС|page|vps_updates_menu|' \
+        '9|Дополнительно: старые сценарии и очистка|page|vps_advanced_menu|'
+}
+
+# Инициализация лога выполняется только при запуске программы.
+mkdir -p "$(dirname "$LOG_FILE")"
+log '=== Запуск vps-setup.sh ==='
+vps_main_menu
+log '=== Выход из vps-setup.sh ==='
+echo 'Выход.'
