@@ -1085,13 +1085,53 @@ except Exception as error:
 PYFINGERPRINT
 }
 
+# Inspect JSON skips the Prometheus metrics request made by human inspect in
+# CrowdSec 1.4.x. A successful inspect alone also does NOT mean installed.
+# Return 0 = installed, 1 = known absent, 2 = unknown/error; never force tainted items.
+crowdsec_hub_item_state() (
+    local kind="$1" name="$2" work rc
+    case "$kind" in collections|parsers) ;; *) return 2 ;; esac
+    work=$(mktemp -d /tmp/crowdsec-hub-state.XXXXXXXX) || return 2
+    trap 'rm -rf "$work"' EXIT
+    if ! timeout 30 cscli "$kind" inspect "$name" -o json >"$work/item.json" 2>"$work/error"; then
+        if grep -Eiq 'unable to retrieve item|item .* not found|item .* doesn.t exist' "$work/error"; then
+            return 1
+        fi
+        cat "$work/error" >&2
+        echo "Не удалось проверить $kind: $name; повторная установка автоматически не запускается." >&2
+        return 2
+    fi
+    python3 - "$work/item.json" "$kind" "$name" <<'PY_HUB_STATE'
+import json,sys
+try:
+    with open(sys.argv[1]) as stream: item=json.load(stream)
+    if not isinstance(item,dict) or item.get('type')!=sys.argv[2] or item.get('name')!=sys.argv[3]:
+        raise ValueError('unexpected item identity or format')
+    installed=item.get('installed',False)  # omitted false in cscli 1.4.x
+    if type(installed) is not bool: raise ValueError('invalid installed state')
+    if installed: sys.exit(0)
+    if item.get('tainted') is True: raise ValueError('tainted item is not enabled; manual review required')
+    sys.exit(1)
+except (OSError,ValueError,TypeError) as error:
+    print('Не удалось определить состояние Hub: '+str(error),file=sys.stderr)
+    sys.exit(2)
+PY_HUB_STATE
+)
+
 # Install a Hub collection without overwriting Debian's packaged/tainted items.
 # A stale Hub index can cause "invalid download hash" on freshly installed systems.
 # Refresh the index only on that specific failure and retry once.
 crowdsec_ensure_collection() {
     local collection="$1" required="$2" output rc
-    if cscli collections inspect "$collection" >/dev/null 2>&1; then
+    if crowdsec_hub_item_state collections "$collection"; then
         echo "✓ Коллекция уже установлена: $collection (штатные/tainted файлы сохраняем)"
+        return 0
+    else
+        rc=$?
+    fi
+    if [[ "$rc" != 1 ]]; then
+        if [[ "$required" == required ]]; then return 1; fi
+        echo "ПРЕДУПРЕЖДЕНИЕ: состояние дополнительной коллекции $collection неизвестно; сохраняем файлы."
         return 0
     fi
 
@@ -1100,7 +1140,13 @@ crowdsec_ensure_collection() {
     if timeout 90 cscli collections install "$collection" >"$output" 2>&1; then
         cat "$output"
         rm -f "$output"
-        return 0
+        if crowdsec_hub_item_state collections "$collection"; then return 0; fi
+        if [[ "$required" != required ]]; then
+            echo "ПРЕДУПРЕЖДЕНИЕ: установка $collection не подтверждена; продолжаем без неё."
+            return 0
+        fi
+        echo "ОШИБКА: установка обязательной коллекции $collection не подтверждена."
+        return 1
     fi
 
     if grep -Eiq 'invalid download hash|Downloaded version doesn.t match index' "$output"; then
@@ -1110,14 +1156,20 @@ crowdsec_ensure_collection() {
             if timeout 90 cscli collections install "$collection" >"$output" 2>&1; then
                 cat "$output"
                 rm -f "$output"
-                return 0
+                if crowdsec_hub_item_state collections "$collection"; then return 0; fi
+                if [[ "$required" != required ]]; then
+                    echo "ПРЕДУПРЕЖДЕНИЕ: установка $collection не подтверждена; продолжаем без неё."
+                    return 0
+                fi
+                echo "ОШИБКА: установка обязательной коллекции $collection не подтверждена."
+                return 1
             fi
         fi
     fi
 
     cat "$output" >&2
     if grep -Eiq 'tainted|won.t enable unless --force' "$output"; then
-        echo "WARN: $collection имеет локальные изменения Debian; --force не применяется." >&2
+        echo "WARN: $collection имеет пакетные или локальные изменения; --force не применяется." >&2
     fi
     rm -f "$output"
     if [ "$required" = required ]; then
@@ -1336,7 +1388,7 @@ EOF
     # Debian 13 provides crowdsecurity/sshd-logs with sshd-session support
     # already backported. Do not depend on upstream-only parser filenames,
     # or rewrite a distribution-managed parser.
-    if ! cscli parsers inspect crowdsecurity/sshd-logs >/dev/null 2>&1; then
+    if ! crowdsec_hub_item_state parsers crowdsecurity/sshd-logs; then
         echo "ОШИБКА: SSH parser crowdsecurity/sshd-logs не установлен."
         echo "Проверьте: cscli parsers list"
         return 1
