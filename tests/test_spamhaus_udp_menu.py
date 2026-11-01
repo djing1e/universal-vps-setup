@@ -24,6 +24,9 @@ class UDPMenuTests(unittest.TestCase):
         self.tool('fakepython', "print('UDP status/action:',sys.argv[-1])")
         self.tool('nft', "print('chain output { policy accept; }')")
         self.tool('systemd-analyze', 'pass')
+        self.tool('base-install', '''from pathlib import Path
+if os.environ.get('FAIL_BASE'): sys.exit(1)
+if not os.environ.get('BASE_STAYS_EMPTY'): Path(os.environ['BASE_READY_FILE']).touch()''')
         self.tool('curl', '''from pathlib import Path
 if os.environ.get('FAIL_DOWNLOAD'): sys.exit(22)
 name='xtls-spamhaus-udp.py' if sys.argv[-3].endswith('.py') else 'xtls-spamhaus-udp-restore.service'
@@ -38,7 +41,7 @@ Path(sys.argv[-1]).write_bytes(b'corrupt' if os.environ.get('CORRUPT_DOWNLOAD') 
                       '/etc/systemd/system/xtls-spamhaus-udp-restore.service':str(self.root/'restore.service'),
                       '/usr/bin/python3':str(self.bin/'fakepython')}
         for old,new in replacements.items(): self.source=self.source.replace(old,new)
-        self.env=dict(os.environ,PATH=str(self.bin)+':'+os.environ['PATH'],MENU_CALLS=str(self.calls),MENU_SOURCE_ROOT=str(ROOT))
+        self.env=dict(os.environ,PATH=str(self.bin)+':'+os.environ['PATH'],MENU_CALLS=str(self.calls),MENU_SOURCE_ROOT=str(ROOT),BASE_READY_FILE=str(self.root/'base-ready'))
 
     def tool(self,name,body):
         p=self.bin/name
@@ -47,7 +50,11 @@ Path(sys.argv[-1]).write_bytes(b'corrupt' if os.environ.get('CORRUPT_DOWNLOAD') 
         p.chmod(0o755)
 
     def run_menu(self,choices='',function='setup_spamhaus_udp_drop',**env):
-        return subprocess.run(['bash','-c','set -euo pipefail\n'+self.source+'\n'+function],
+        overrides='''
+spamhaus_output_ready() { [[ "${BASE_READY:-1}" == 1 || -f "$BASE_READY_FILE" ]]; }
+spamhaus_output_install_checked() { base-install; }
+'''
+        return subprocess.run(['bash','-c','set -euo pipefail\n'+self.source+overrides+'\n'+function],
                               input=choices,text=True,capture_output=True,env=self.env|env)
 
     def logged(self):
@@ -67,13 +74,13 @@ Path(sys.argv[-1]).write_bytes(b'corrupt' if os.environ.get('CORRUPT_DOWNLOAD') 
         try:
             output=bytearray()
             deadline=time.monotonic()+5
-            while b' / 0]: ' not in output:
+            while b'[0-6]: ' not in output:
                 self.assertLess(time.monotonic(),deadline,'menu prompt not shown')
                 if select.select([master],[],[],.1)[0]:
                     output.extend(os.read(master,4096))
             # Type wrong choice 9, erase it, select status 1, then exit.
             # Without Readline this becomes an invalid choice for Ctrl-H.
-            os.write(master,b'9'+key+b'1\n0\n')
+            os.write(master,b'9'+key+b'2\n0\n')
             while process.poll() is None and time.monotonic()<deadline:
                 if select.select([master],[],[],.1)[0]:
                     try:
@@ -101,25 +108,25 @@ Path(sys.argv[-1]).write_bytes(b'corrupt' if os.environ.get('CORRUPT_DOWNLOAD') 
         self.assertEqual(list(self.config.iterdir()),[])
 
     def test_status_does_not_activate_or_change_services(self):
-        r=self.run_menu('1\n0\n')
+        r=self.run_menu('2\n0\n')
         self.assertEqual(r.returncode,0,r.stderr)
         self.assertEqual([row[-1] for row in self.logged()],['status'])
 
     def test_unknown_installed_content_is_not_executed(self):
         self.target.write_text('custom module')
-        r=self.run_menu('1\n0\n')
+        r=self.run_menu('2\n0\n')
         self.assertIn('Неизвестная версия',r.stdout)
         self.assertEqual(self.logged(),[])
 
     def test_cancel_enable_does_not_schedule_or_enable(self):
         (self.config/'exemptions.txt').write_text('# reviewed\n')
-        r=self.run_menu('2\ncancel\n0\n')
+        r=self.run_menu('3\ncancel\n0\n')
         self.assertEqual(r.returncode,0,r.stderr)
         self.assertEqual(self.logged(),[])
 
     def test_enable_schedules_safety_before_module_action(self):
         (self.config/'exemptions.txt').write_text('# reviewed\n')
-        r=self.run_menu('2\nENABLE-SPAMHAUS-UDP-DROP\n0\n')
+        r=self.run_menu('3\nENABLE-SPAMHAUS-UDP-DROP\n0\n')
         self.assertEqual(r.returncode,0,r.stderr)
         calls=self.logged()
         self.assertEqual(calls[0][0],'systemd-run')
@@ -129,13 +136,13 @@ Path(sys.argv[-1]).write_bytes(b'corrupt' if os.environ.get('CORRUPT_DOWNLOAD') 
 
     def test_failed_safety_timer_prevents_enable(self):
         (self.config/'exemptions.txt').write_text('# reviewed\n')
-        r=self.run_menu('2\nENABLE-SPAMHAUS-UDP-DROP\n0\n',FAIL_TIMER='1')
+        r=self.run_menu('3\nENABLE-SPAMHAUS-UDP-DROP\n0\n',FAIL_TIMER='1')
         self.assertEqual(r.returncode,0,r.stderr)
         self.assertEqual(len(self.logged()),1)
         self.assertEqual(self.logged()[0][0],'systemd-run')
 
     def test_disable_is_explicit_and_routes_only_to_own_module(self):
-        r=self.run_menu('3\n0\n')
+        r=self.run_menu('4\n0\n')
         self.assertEqual(r.returncode,0,r.stderr)
         self.assertEqual(self.logged(),[['fakepython',str(self.target),'disable-block']])
 
@@ -155,12 +162,12 @@ Path(sys.argv[-1]).write_bytes(b'corrupt' if os.environ.get('CORRUPT_DOWNLOAD') 
     def test_exemptions_require_observe_and_validate_before_writing(self):
         p=self.config/'exemptions.txt';p.write_text('192.0.2.1/32\n')
         (self.config/'mode').write_text('block\n')
-        self.run_menu('4\n0\n')
+        self.run_menu('5\n0\n')
         self.assertEqual(p.read_text(),'192.0.2.1/32\n')
         (self.config/'mode').write_text('observe\n')
-        self.run_menu('4\n0.0.0.0/0\n0\n')
+        self.run_menu('5\n0.0.0.0/0\n0\n')
         self.assertEqual(p.read_text(),'192.0.2.1/32\n')
-        r=self.run_menu('4\n192.0.2.10,2001:db8::1\n0\n')
+        r=self.run_menu('5\n192.0.2.10,2001:db8::1\n0\n')
         self.assertEqual(r.returncode,0,r.stderr)
         self.assertEqual(p.read_text(),'192.0.2.10/32\n2001:db8::1/128\n')
         self.assertTrue(list(self.config.glob('exemptions.txt.bak-*')))
@@ -198,6 +205,34 @@ Path(sys.argv[-1]).write_bytes(b'corrupt' if os.environ.get('CORRUPT_DOWNLOAD') 
         self.assertNotEqual(r.returncode,0)
         self.assertEqual(unit.read_text(),'local unit')
 
+    def test_fresh_install_prepares_source_before_enabling_udp_service(self):
+        self.target.unlink()
+        r=self.run_menu(function='spamhaus_udp_install',BASE_READY='0')
+        self.assertEqual(r.returncode,0,r.stderr)
+        calls=self.logged()
+        base=next(i for i,c in enumerate(calls) if c[0]=='base-install')
+        enable=next(i for i,c in enumerate(calls) if c[:2]==['systemctl','enable'])
+        self.assertLess(base,enable)
+        self.assertTrue(self.target.exists())
+        self.assertFalse(any(c[-1]=='enable-block' for c in calls))
+        self.assertIn('1/2:',r.stdout)
+
+    def test_source_failure_or_empty_sets_never_enable_udp_service(self):
+        for flag in ('FAIL_BASE','BASE_STAYS_EMPTY'):
+            self.calls.unlink(missing_ok=True)
+            self.target.unlink(missing_ok=True)
+            r=self.run_menu(function='spamhaus_udp_install',BASE_READY='0',**{flag:'1'})
+            self.assertNotEqual(r.returncode,0)
+            self.assertFalse(self.target.exists())
+            self.assertFalse((self.root/'restore.service').exists())
+            self.assertFalse(any(c[:2]==['systemctl','enable'] for c in self.logged()))
+
+    def test_unknown_udp_never_starts_source_install(self):
+        self.target.write_text('custom module')
+        r=self.run_menu(function='spamhaus_udp_install',BASE_READY='0')
+        self.assertNotEqual(r.returncode,0)
+        self.assertFalse(any(c[0]=='base-install' for c in self.logged()))
+
     def test_main_udp_entry_opens_spamhaus_directly(self):
         text=(ROOT/'vps-setup.sh').read_text()
         center='setup_antiabuse_center() {'+text.split('setup_antiabuse_center() {',1)[1].split('antiabuse_center_status() {',1)[0]
@@ -217,9 +252,9 @@ Path(sys.argv[-1]).write_bytes(b'corrupt' if os.environ.get('CORRUPT_DOWNLOAD') 
         self.assertIn('ROUTE_LEGACY_PAIRS',r.stdout)
         self.assertNotIn('ROUTE_SPAMHAUS_UDP',r.stdout)
 
-    def test_status_first_and_no_duplicate_nested_udp_entry(self):
+    def test_install_first_and_no_duplicate_nested_udp_entry(self):
         r=self.run_menu('0\n')
-        self.assertLess(r.stdout.index('1) Статус'),r.stdout.index('9) Установка'))
+        self.assertLess(r.stdout.index('1) Установить'),r.stdout.index('2) Статус'))
         text=(ROOT/'vps-setup.sh').read_text()
         feeds=text.split('setup_spamhaus_out_observe() {',1)[1].split('setup_auto_abuse_guard() {',1)[0]
         self.assertNotIn('setup_spamhaus_udp_drop',feeds)

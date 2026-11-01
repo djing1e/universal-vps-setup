@@ -1129,6 +1129,27 @@ crowdsec_ensure_collection() {
 }
 
 crowdsec_install() {
+    local detail_log rc
+    local -a results
+    detail_log=$(mktemp /var/log/vps-setup-crowdsec.XXXXXXXX.log) || return 1
+    chmod 600 "$detail_log" || return 1
+    echo "Подробный журнал CrowdSec: $detail_log"
+    crowdsec_install_impl 2>&1 | tee "$detail_log"
+    results=("${PIPESTATUS[@]}")
+    rc=${results[0]}
+    if [[ "${results[1]}" != 0 ]]; then
+        echo 'ОШИБКА: подробный журнал CrowdSec записан не полностью.' >&2
+        [[ "$rc" != 0 ]] || rc=1
+    fi
+    log "CrowdSec: код $rc; подробный журнал: $detail_log"
+    if [[ "$rc" != 0 ]]; then
+        echo "Установка CrowdSec не завершена. Причина сохранена в $detail_log"
+        echo 'Не запускайте полный стек повторно: повторная установка доступна в разделе CrowdSec.'
+    fi
+    return "$rc"
+}
+
+crowdsec_install_impl() {
     echo ""
     echo "=== [1/7] Установка CrowdSec ==="
 
@@ -9341,7 +9362,7 @@ setup_udp_abuse() {
     echo "  0) Назад"
     read -e -r -p "Выбор: " choice
     case "$choice" in
-      1) bash "$f" install || rc=$? ;;
+      1) spamhaus_output_install_checked || rc=$? ;;
       2) bash "$f" status || rc=$? ;;
       3) if [[ -x /usr/local/sbin/xtls-udp-abuse ]]; then /usr/local/sbin/xtls-udp-abuse restore || rc=$?; else echo "Сначала установите"; fi ;;
       4) bash "$f" enable-block || rc=$? ;;
@@ -9692,9 +9713,94 @@ XTLS_SPAMHAUS_OUTPUT_MODULE_END
 }
 spamhaus_udp_require_installed() {
     local target=/usr/local/sbin/xtls-spamhaus-udp
-    [[ -f "$target" && ! -L "$target" ]] || { echo 'Сначала установите UDP-расширение'; return 1; }
+    [[ -f "$target" && ! -L "$target" ]] || { echo 'UDP-защита ещё не установлена. Выберите 1: установить и подготовить сети.'; return 1; }
     printf '%s  %s\n' 3a9a538570385684e01514cb38f48937870780dae7f593983b3f6b6b55479f5a "$target" |
         sha256sum -c --status || { echo 'Неизвестная версия UDP-модуля: требуется ручная проверка'; return 1; }
+}
+
+# A UDP guard depends on the shared observer's chain, populated sets and boot unit.
+# Probing a fresh VPS is expected to fail quietly; it is not an nft syntax error.
+spamhaus_output_ready() {
+    nft -j list table inet xtls_spamhaus_out 2>/dev/null | python3 -c '
+import json,sys
+try:
+    rows=json.load(sys.stdin)["nftables"]
+    for v,kind in ((4,"ipv4_addr"),(6,"ipv6_addr")):
+        sets=[x["set"] for x in rows if x.get("set",{}).get("name")==f"v{v}"]
+        if len(sets)!=1 or sets[0].get("type")!=kind or not sets[0].get("elem"): sys.exit(1)
+    chains=[x["chain"] for x in rows if x.get("chain",{}).get("name")=="output"]
+    if len(chains)!=1 or chains[0].get("hook")!="output" or chains[0].get("type")!="filter": sys.exit(1)
+except (ValueError,KeyError,TypeError): sys.exit(1)
+' || return 1
+    [[ "$(systemctl show --value --property=LoadState xtls-spamhaus-output-restore.service 2>/dev/null)" == loaded ]]
+}
+
+# Use the bundled observer, never replace unknown files or local unit overrides.
+spamhaus_output_install_checked() (
+    set -euo pipefail
+    umask 077
+    local work target=/usr/local/sbin/xtls-spamhaus-output
+    work=$(mktemp -d /tmp/xtls-spamhaus-base.XXXXXXXX) || return 1
+    trap 'rm -rf "$work"' EXIT
+    xtls_spamhaus_out_write_module > "$work/observer.sh"
+    bash -n "$work/observer.sh" || return 1
+    python3 - "$work/observer.sh" <<'PY_BASE_PREFLIGHT' || return 1
+import hashlib,os,re,stat,sys
+from pathlib import Path
+source=Path(sys.argv[1]).read_bytes()
+target=Path('/usr/local/sbin/xtls-spamhaus-output')
+known={hashlib.sha256(source).hexdigest(), '5adc3759693949320b108e8e98ae59029aed810e826554589271dd59e9b1521d'}
+def regular(path):
+    info=path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_uid!=0 or info.st_gid!=0 or info.st_mode & 0o022:
+        raise ValueError(f'нестандартный файл: {path}')
+try:
+    for directory in (Path('/etc/xtls-spamhaus-output'),Path('/usr/local/sbin'),Path('/etc/systemd/system')):
+        if directory.is_symlink(): raise ValueError(f'symlink: {directory}')
+    if target.exists() or target.is_symlink():
+        regular(target)
+        if hashlib.sha256(target.read_bytes()).hexdigest() not in known:
+            raise ValueError('неизвестная версия Spamhaus OUTPUT; автоматическая замена отменена')
+    units=re.findall(r"cat >(/etc/systemd/system/xtls-spamhaus-output-[^ ]+) <<'UNIT'\n(.*?)\nUNIT", source.decode(), re.S)
+    if len(units)!=3: raise ValueError('не удалось проверить шаблоны unit')
+    for name,body in units:
+        path=Path(name)
+        if path.exists() or path.is_symlink():
+            regular(path)
+            if path.read_bytes()!=(body+'\n').encode(): raise ValueError(f'локальные изменения unit: {path}')
+        override=Path(str(path)+'.d')
+        if override.is_symlink() or (override.exists() and any(override.iterdir())):
+            raise ValueError(f'локальные переопределения: {override}')
+    config=Path('/etc/xtls-spamhaus-output')
+    if config.exists():
+        for path in config.iterdir():
+            if path.is_symlink(): raise ValueError(f'symlink в конфигурации: {path}')
+except (OSError,ValueError) as error:
+    print('Подготовка Spamhaus отменена: '+str(error),file=sys.stderr)
+    sys.exit(1)
+PY_BASE_PREFLIGHT
+    # With no known executable, do not adopt a similarly named foreign table.
+    if [[ ! -e "$target" ]] && nft list table inet xtls_spamhaus_out >/dev/null 2>&1; then
+        echo 'Таблица Spamhaus есть, но её модуль неизвестен. Нужна ручная проверка.'
+        return 1
+    fi
+    bash "$work/observer.sh" install || return 1
+)
+
+spamhaus_udp_prepare_source() {
+    if spamhaus_output_ready; then return 0; fi
+    echo 'Подготовка UDP-защиты: базовые наборы Spamhaus ещё не готовы.'
+    echo '1/2: установить Spamhaus OUTPUT и загрузить сети IPv4/IPv6.'
+    echo '2/2: установить UDP-расширение в Observe; существующий режим сохранить.'
+    echo 'Блокировка не включается автоматически. Локальные изменения файлов не заменяются.'
+    spamhaus_output_install_checked || {
+        echo 'Не удалось подготовить сети Spamhaus. UDP-расширение не запускается.'
+        return 1
+    }
+    spamhaus_output_ready || {
+        echo 'Наборы Spamhaus или boot-unit не готовы после установки. UDP-расширение не запускается.'
+        return 1
+    }
 }
 
 spamhaus_udp_install() (
@@ -9704,10 +9810,6 @@ spamhaus_udp_install() (
     local unit=/etc/systemd/system/xtls-spamhaus-udp-restore.service
     local config=/etc/xtls-spamhaus-udp work path
     local base=https://raw.githubusercontent.com/djing1e/universal-vps-setup/0dbef9a93c7b9ff109bd584856e45dbe2807419e/modules
-    nft list chain inet xtls_spamhaus_out output >/dev/null || return 1
-    [[ "$(systemctl show --value --property=LoadState xtls-spamhaus-output-restore.service)" == loaded ]] || {
-        echo 'Сначала установите Spamhaus OUTPUT Observe'; return 1;
-    }
     [[ ! -L "$config" ]] || { echo 'Каталог UDP — symlink; требуется ручная проверка'; return 1; }
     for path in "$target" "$unit"; do
         [[ ! -L "$path" ]] || { echo "Symlink: $path; требуется ручная проверка"; return 1; }
@@ -9722,6 +9824,7 @@ spamhaus_udp_install() (
     python3 -c 'import sys; compile(open(sys.argv[1], "rb").read(), sys.argv[1], "exec")' "$work/module.py" || return 1
     [[ ! -e "$target" ]] || cmp -s "$target" "$work/module.py" || { echo 'Неизвестный установленный UDP-модуль; замена отменена'; return 1; }
     [[ ! -e "$unit" ]] || cmp -s "$unit" "$work/xtls-spamhaus-udp-restore.service" || { echo 'Нестандартный UDP unit; замена отменена'; return 1; }
+    spamhaus_udp_prepare_source || return 1
     systemd-analyze verify "$work/xtls-spamhaus-udp-restore.service" || return 1
     install -d -m 700 "$config" || return 1
     if [[ ! -e "$target" ]]; then install -m 755 "$work/module.py" "$target" || return 1; fi
@@ -9731,7 +9834,7 @@ spamhaus_udp_install() (
     systemctl enable --now xtls-spamhaus-udp-restore.service || return 1
     echo 'UDP-расширение установлено. Существующие режим и исключения сохранены.'
     if [[ ! -f "$config/exemptions.txt" ]]; then
-        echo 'Перед включением DROP задайте исключения через пункт 4 этого подменю.'
+        echo 'Перед включением DROP задайте исключения через пункт 5 этого подменю.'
     fi
 )
 
@@ -9787,7 +9890,7 @@ spamhaus_udp_enable() {
         return
     fi
     [[ "$mode" == observe ]] || { echo 'Неизвестный режим; требуется ручная проверка'; return 1; }
-    [[ -f /etc/xtls-spamhaus-udp/exemptions.txt ]] || { echo 'Сначала задайте исключения через пункт 4'; return 1; }
+    [[ -f /etc/xtls-spamhaus-udp/exemptions.txt ]] || { echo 'Сначала задайте исключения через пункт 5'; return 1; }
     echo 'UDP к сетям Spamhaus будет заблокирован. Через 5 минут сработает автоотключение.'
     read -e -r -p 'Введите ENABLE-SPAMHAUS-UDP-DROP: ' answer || return 1
     [[ "$answer" == ENABLE-SPAMHAUS-UDP-DROP ]] || { echo 'Отменено'; return 0; }
@@ -9820,21 +9923,24 @@ setup_spamhaus_udp_drop() {
     local choice
     while true; do
         echo '=== UDP DROP по сетям Spamhaus ==='
-        echo '1) Статус и счётчики'
-        echo '2) Включить DROP (с автоотключением через 5 минут)'
-        echo '3) Отключить DROP'
-        echo '4) Исключения: разрешённые адреса (при Observe)'
+        if [[ ! -f /usr/local/sbin/xtls-spamhaus-udp ]]; then
+            echo 'Не установлено. Начните с пункта 1 — он подготовит все зависимости.'
+        fi
+        echo '1) Установить / подготовить UDP-защиту (включая сети Spamhaus)'
+        echo '2) Статус и счётчики'
+        echo '3) Включить DROP (с автоотключением через 5 минут)'
+        echo '4) Отключить DROP'
+        echo '5) Исключения: разрешённые адреса (при Observe)'
         echo '6) Доступ проверен: оставить DROP включённым'
-        echo '9) Установка / проверка расширения'
         echo '0) Назад'
-        read -e -r -p 'Выбор [1-4, 6, 9 / 0]: ' choice || return 0
+        read -e -r -p 'Выбор [0-6]: ' choice || return 0
         case "$choice" in
-            1) if spamhaus_udp_require_installed; then /usr/bin/python3 /usr/local/sbin/xtls-spamhaus-udp status || echo 'Не удалось прочитать UDP-статус'; fi ;;
-            2) spamhaus_udp_enable || echo 'Проверьте статус и защитный таймер' ;;
-            3) if spamhaus_udp_require_installed; then /usr/bin/python3 /usr/local/sbin/xtls-spamhaus-udp disable-block || echo 'Отключение не подтверждено; проверьте статус'; fi ;;
-            4) spamhaus_udp_exemptions || echo 'Исключения не изменены' ;;
+            1) spamhaus_udp_install || echo 'Установка не завершена. DROP автоматически не включался; проверьте причину выше.' ;;
+            2) if spamhaus_udp_require_installed; then /usr/bin/python3 /usr/local/sbin/xtls-spamhaus-udp status || echo 'Не удалось прочитать UDP-статус'; fi ;;
+            3) spamhaus_udp_enable || echo 'Проверьте статус и защитный таймер' ;;
+            4) if spamhaus_udp_require_installed; then /usr/bin/python3 /usr/local/sbin/xtls-spamhaus-udp disable-block || echo 'Отключение не подтверждено; проверьте статус'; fi ;;
+            5) spamhaus_udp_exemptions || echo 'Исключения не изменены' ;;
             6) spamhaus_udp_keep || echo 'Подтверждение не завершено' ;;
-            9) spamhaus_udp_install || echo 'Установка не завершена' ;;
             0) return 0 ;;
             *) echo 'Неверный выбор' ;;
         esac
