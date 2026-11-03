@@ -34,12 +34,18 @@ class NavigationTests(unittest.TestCase):
             return result, events
 
     def test_open_every_top_level_section_and_back_without_actions(self):
-        for key in ('1', '2', '3', '4', '5', '6', '9'):
+        for key in ('2', '3', '4', '5', '6', '7', '9'):
             with self.subTest(key=key):
                 result, calls = self.run_menu(answers=f'{key}\n0\n0\n')
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(calls, [])
                 self.assertGreaterEqual(result.stdout.count('VPS / Главное меню'), 2)
+
+    def test_universal_install_is_the_first_direct_action(self):
+        result, calls = self.run_menu(answers='1\n\n0\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, ['setup_one_button:'])
+        self.assertIn('1) Универсальная установка VPS', result.stdout)
 
     def test_eof_at_every_menu_is_clean_and_has_no_action(self):
         entries = re.findall(r'^(vps_\w+_menu)\(\)', NAV, re.M)
@@ -59,13 +65,13 @@ class NavigationTests(unittest.TestCase):
 
     def test_explicit_selection_runs_only_selected_installer(self):
         # Main -> installation -> NextDNS -> preview continue -> pause -> back -> exit.
-        result, calls = self.run_menu(answers='1\n2\n1\n\n0\n0\n')
+        result, calls = self.run_menu(answers='7\n2\n1\n\n0\n0\n')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(calls, ['setup_nextdns:'])
         self.assertIn('Применение изменит системный DNS', result.stdout)
 
     def test_base_ssh_does_not_install_full_stack(self):
-        result, calls = self.run_menu(answers='1\n1\n2\n1\n\n0\n0\n0\n')
+        result, calls = self.run_menu(answers='7\n1\n2\n1\n\n0\n0\n0\n')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(calls, ['do_ssh_setup:'])
 

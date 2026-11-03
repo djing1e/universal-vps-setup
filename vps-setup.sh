@@ -8642,11 +8642,10 @@ setup_threat_blocklist() {
 }
 
 # =====================================================
-# МОДУЛЬ 0: ОДНА КНОПКА (полный prod-стек) + ПОЛНАЯ ВЫЧИСТКА
+# МОДУЛЬ 0: УНИВЕРСАЛЬНАЯ УСТАНОВКА + ПОЛНАЯ ВЫЧИСТКА
 # =====================================================
-# Накатывает весь стек в правильной последовательности с логами, пошаговой
-# диагностикой и сводным отчётом. Без TG. Продолжает при ошибках (не падает),
-# в конце печатает OK/FAIL по каждому шагу.
+# Начальная настройка без дополнительных сетевых и Anti-Abuse модулей.
+# Критические ошибки останавливают установку; все выполненные шаги видны в отчёте.
 
 # ── раннер шага: логирует, ловит код возврата, не роняет скрипт ──
 ONEBTN_RESULTS=()
@@ -8681,118 +8680,93 @@ onebtn_step() {
     return 0
 }
 
+# Base tuning uses the running distribution kernel; never call do_sysctl_setup
+# here because that legacy wrapper also installs XanMod.
+do_base_network_tuning() {
+    kt_apply_sysctl || return 1
+    if [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" != bbr ]] ||
+       [[ "$(sysctl -n net.core.default_qdisc 2>/dev/null)" != fq ]]; then
+        rn_error "Базовый тюнинг: BBR / fq не подтверждены на текущем ядре."
+        return 1
+    fi
+    rn_success "Базовый тюнинг сети применён на текущем ядре."
+}
+
 setup_one_button() {
     print_header
-    echo "╔══════════════════════════════════════════╗"
-    echo "║   🚀 УСТАНОВИТЬ ВСЁ (полный prod-стек)   ║"
-    echo "╚══════════════════════════════════════════╝"
-    echo ""
-    echo "  Накатит в правильной последовательности:"
-    echo "    1. База: SSH+UFW+тюнинг ядра+XanMod(BBRv3)+fail2ban"
-    echo "    2. CrowdSec (поведенческий IPS, БЕЗ Traffic-Guard)"
-    echo "    3. AS_Network_List — РФ-госсети → INPUT"
-    echo "    4. Threat-Intel — Spamhaus+FireHOL L1 → INPUT"
-    echo "    5. Anti-DDoS vpsguard — nft per-IP лимиты"
-    echo ""
-    rn_warn "ВНИМАНИЕ: ставить ТОЛЬКО на свежую ноду / эталон."
-    rn_warn "CrowdSec сохраняет существующий UFW; другие шаги полного стека могут изменить firewall."
-    rn_warn "XanMod заменит ядро (reboot спросим в конце)."
-    rn_warn "vpsguard спросит порты/лимиты на своём шаге."
-    echo ""
-    echo "  Порядок при ошибке шага: ПРОДОЛЖАТЬ, отчёт в конце."
-    echo ""
-    read -e -p "Поехали? Введи 'yes' для старта: " _go
-    [[ "$_go" == "yes" ]] || { echo "Отменено."; return; }
+    echo 'VPS / Универсальная установка'
+    echo
+    echo '  1. Обновить системные пакеты (APT)'
+    echo "  2. Настроить SSH: ключ и порт (по умолчанию ${DEFAULT_SSH_PORT})"
+    echo '  3. Настроить UFW: входящие порты'
+    echo '  4. Базовый тюнинг сети: BBR, fq, буферы и conntrack'
+    echo '  5. Настроить автообновления ОС'
+    echo '  6. Установить fail2ban для SSH'
+    echo '  7. Установить CrowdSec и Firewall Bouncer'
+    echo
+    echo 'Не входят: DNS, XanMod, Anti-DDoS, Anti-Abuse и AS-списки.'
+    echo 'Docker и Remnanode устанавливаются отдельно.'
+    echo
+    rn_warn 'Для начальной настройки VPS. Это не безопасное обновление работающей ноды.'
+    rn_warn 'Изменятся SSH, firewall и sysctl; APT может перезапустить службы.'
+    rn_warn 'Сохраните консольный доступ провайдера. Порт SSH и порты UFW будут запрошены.'
+    echo 'При ошибке пакетов, SSH или UFW установка остановится. Остальные ошибки попадут в отчёт.'
+    local answer
+    read -e -r -p "Начать установку? Введите yes (0 — назад): " answer || return 0
+    [[ "$answer" == yes ]] || { echo 'Отменено.'; return 0; }
 
     ONEBTN_RESULTS=()
-    KT_REBOOT_NEEDED=0
-    local _start; _start=$(date +%s)
-    log "=== [ONE-BUTTON] НАЧАЛО полного наката ==="
+    local started finished critical_failed=0
+    started=$(date +%s)
+    log '=== [ONE-BUTTON] НАЧАЛО универсальной установки ==='
 
-    # Preflight: гарантируем loopback ACCEPT и ждём готовности DNS (после ребута resolved
-    # стартует с гонкой — без этого скачивание списков ловит таймаут резолвинга).
-    ensure_loopback_accept
-    echo ""
-    echo "▶ Preflight: проверка DNS…"
-    if wait_for_dns 15; then
-        rn_success "DNS резолвит — продолжаю"
+    onebtn_step 'Системные пакеты' do_update_packages
+    if [[ "${ONEBTN_RESULTS[-1]}" == OK* ]]; then
+        onebtn_step "SSH (ключ + порт ${DEFAULT_SSH_PORT})" do_ssh_setup
     else
-        rn_warn "DNS не резолвит за 30с — сетевые шаги могут упасть (используется локальный fallback где есть)"
+        critical_failed=1
+    fi
+    if [[ "$critical_failed" == 0 && "${ONEBTN_RESULTS[-1]}" == OK* ]]; then
+        onebtn_step 'UFW: входящие порты' do_ufw_setup
+    else
+        critical_failed=1
+    fi
+    if [[ "$critical_failed" == 0 && "${ONEBTN_RESULTS[-1]}" == OK* ]]; then
+        onebtn_step 'Базовый тюнинг сети (текущее ядро)' do_base_network_tuning
+        onebtn_step 'Автообновления ОС' do_autoupgrade
+        onebtn_step 'fail2ban: защита SSH' do_fail2ban
+        onebtn_step 'CrowdSec + Firewall Bouncer' crowdsec_install
+    else
+        critical_failed=1
+        rn_error 'Установка остановлена: пакеты, SSH или UFW не настроены успешно.'
     fi
 
-    # ── Шаг 1: база (вкл. тюнинг ядра + XanMod автоматически) ──
-    onebtn_step "База: пакеты" do_update_packages
-    onebtn_step "База: SSH (ключ+порт ${DEFAULT_SSH_PORT})" do_ssh_setup
-    if [[ "${ONEBTN_RESULTS[-1]}" == FAIL* ]]; then
-        rn_error "SSH не настроен; полный накат остановлен во избежание потери доступа."
-        return 1
-    fi
-    onebtn_step "База: UFW" do_ufw_setup
-    if [[ "${ONEBTN_RESULTS[-1]}" == FAIL* ]]; then
-        rn_error "UFW не настроен; полный накат остановлен во избежание потери доступа."
-        return 1
-    fi
-    onebtn_step "База: тюнинг ядра/сети + XanMod" do_sysctl_setup
-    onebtn_step "База: автообновления" do_autoupgrade
-    onebtn_step "База: fail2ban" do_fail2ban
-
-    # ── Шаг 2: CrowdSec (без TG) ──
-    onebtn_step "CrowdSec (поведенческий IPS)" crowdsec_install
-
-    # ── Шаг 3: AS_Network_List (РФ-госсети → INPUT) ──
-    onebtn_step "AS_Network_List (РФ-госсети)" asb_install_iptables
-
-    # ── Шаг 4: Threat-Intel (Spamhaus+FireHOL → INPUT) ──
-    onebtn_step "Threat-Intel (Spamhaus+FireHOL L1)" tib_install
-
-    # ── Шаг 5: Anti-DDoS vpsguard (интерактивный — спросит параметры) ──
-    echo ""
-    rn_info "Следующий шаг (vpsguard) спросит порты/лимиты."
-    onebtn_step "Anti-DDoS vpsguard (nft per-IP)" ad_install
-
-    # ── Сводный отчёт ──
-    local _end; _end=$(date +%s)
-    print_header
-    echo "╔══════════════════════════════════════════╗"
-    echo "║   ОТЧЁТ: полный накат завершён           ║"
-    echo "╚══════════════════════════════════════════╝"
-    echo ""
+    finished=$(date +%s)
+    echo
+    echo '=== ОТЧЁТ: универсальная установка ==='
     local okc=0 failc=0 skipc=0 line
     for line in "${ONEBTN_RESULTS[@]}"; do
-        if [[ "$line" == OK* ]]; then
-            echo "  ✔ ${line}"; okc=$((okc+1))
-        elif [[ "$line" == SKIP* ]]; then
-            echo "  ⊘ ${line}"; skipc=$((skipc+1))
-        else
-            echo "  ✗ ${line}"; failc=$((failc+1))
-        fi
+        echo "  $line"
+        case "$line" in
+            OK*) okc=$((okc+1)) ;;
+            SKIP*) skipc=$((skipc+1)) ;;
+            *) failc=$((failc+1)) ;;
+        esac
     done
-    echo ""
-    echo "  Итого: ${okc} OK, ${failc} FAIL, ${skipc} SKIP   (за $(( _end - _start ))с)"
+    echo "Итого: ${okc} OK, ${failc} FAIL, ${skipc} SKIP (за $((finished - started))с)"
     log "=== [ONE-BUTTON] КОНЕЦ: ${okc} OK, ${failc} FAIL, ${skipc} SKIP ==="
-    echo ""
-    if [ "$failc" -gt 0 ]; then
-        rn_warn "Есть упавшие шаги — глянь лог: $LOG_FILE"
-        rn_warn "Каждый шаг можно доустановить вручную из главного меню."
+    if (( critical_failed || failc )); then
+        rn_warn "Установка не завершена полностью. Журнал: $LOG_FILE"
+        rn_warn 'Повторите только неудачный шаг через «Отдельные компоненты». Не запускайте весь сценарий повторно.'
+        return 1
+    fi
+    if (( skipc )); then
+        rn_warn 'Установка завершена с пропущенными шагами. Проверьте отчёт выше.'
     else
-        rn_success "Все шаги прошли. Проверь: nft list table inet vpsguard | grep -c meter"
+        rn_success 'Универсальная установка завершена.'
     fi
-    echo ""
-    echo "  Быстрая проверка стека:"
-    echo "    • BBR:        sysctl net.ipv4.tcp_congestion_control"
-    echo "    • CrowdSec:   cscli metrics | head"
-    echo "    • AS-список:  ipset list asn-blacklist-v4 | grep entries"
-    echo "    • Threat:     ipset list threat-block-v4 | grep entries"
-    echo "    • vpsguard:   vpsguard-status"
-    echo "    • Ноды/xray:  docker ps; ss -tlnp | grep -E ':443|:10085'"
-    echo ""
-
-    # ── XanMod reboot (как обычно — спрашиваем) ──
-    if [ "${KT_REBOOT_NEEDED:-0}" = "1" ]; then
-        rn_warn "XanMod установлен — для активации BBRv3 нужна ПЕРЕЗАГРУЗКА."
-        read -e -p "Перезагрузить сейчас? (y/n): " _rb
-        [[ "$_rb" == "y" ]] && { log "[ONE-BUTTON] reboot по запросу"; reboot; }
-    fi
+    echo 'Проверка состояния: главное меню → 5 → 1.'
+    return 0
 }
 
 # =====================================================
@@ -10480,7 +10454,6 @@ vps_advanced_menu() {
     vps_menu 'VPS / Дополнительно' \
         'Старые комплексные сценарии предназначены для отдельной подготовки сервера. Проверяйте их состав перед запуском.' \
         '1|Подготовка РФ-ноды: APT-зеркала и Docker|action|vps_prepare_ru_entry|' \
-        '8|Старый сценарий: полный стек, включая SSH, firewall и XanMod|action|setup_one_button|' \
         '9|Полная очистка: удаление установленных слоёв|action|cleanup_legacy|'
 }
 
@@ -10494,14 +10467,15 @@ vps_prepare_ru_entry() {
 
 vps_main_menu() {
     vps_menu 'VPS / Главное меню' \
-        'Начальная настройка — пункт 1. Состояние сервера — пункт 5. Выход из любого раздела — 0.' \
-        '1|Установить и настроить компоненты|page|vps_install_menu|' \
+        'Новый VPS — пункт 1. Отдельные компоненты — пункт 7. Состояние — пункт 5. Назад / выход — 0.' \
+        '1|Универсальная установка VPS|action|setup_one_button|' \
         '2|Защита: firewall, Anti-DDoS, Anti-Abuse|page|vps_security_menu|' \
         '3|Сеть и ресурсы: DNS, IPv6, BBR, Swap|page|vps_network_menu|' \
         '4|VPN-нода: Remnanode, Docker, шейпер|page|vps_node_menu|' \
         '5|Проверить сервер: статус и журналы|page|vps_diagnostics_menu|' \
         '6|Обновления: Guard и пакеты ОС|page|vps_updates_menu|' \
-        '9|Дополнительно: старые сценарии и очистка|page|vps_advanced_menu|'
+        '7|Отдельные компоненты: установить / настроить|page|vps_install_menu|' \
+        '9|Дополнительно: подготовка РФ-ноды и очистка|page|vps_advanced_menu|'
 }
 
 # Инициализация лога выполняется только при запуске программы.
