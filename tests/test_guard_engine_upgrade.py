@@ -29,6 +29,7 @@ class UpgradeTests(unittest.TestCase):
         self.engine.write_bytes(self.old);self.engine.chmod(0o755)
         self.candidate=self.root/'candidate';self.candidate.write_bytes(self.new)
         (self.root/'run').mkdir()
+        (self.root/'var/lib').mkdir(parents=True)
         unitdir=self.root/'etc/systemd/system';unitdir.mkdir(parents=True)
         (self.root/'etc/os-release').write_text('ID=debian\nVERSION_ID=13\n')
         self.policy={'target_revision':'a'*40,'target_sha256':upgrade.digest(self.new),
@@ -42,7 +43,13 @@ class UpgradeTests(unittest.TestCase):
                           'FragmentPath':'/etc/systemd/system/'+name,'DropInPaths':'','NeedDaemonReload':'no'}
                      for name in (upgrade.SERVICE,upgrade.TIMER)}
         self.calls=[];self.fail_scan=False;self.fail_old=False;self.fail_stop=False
-        self.guard=upgrade.Upgrade(self.policy,self.root,self.runner)
+        resources={upgrade.ENGINE:{'sha256':self.policy['target_sha256'],'allowed_modes':[0o755]}}
+        for name,digest in self.policy['units'].items():
+            resources['/etc/systemd/system/'+name]={'sha256':digest,'allowed_modes':[0o600,0o644]}
+        self.catalog={'schema_version':1,'components':{'auto-abuse-guard':{
+            'version':'1.0.0-rc.1','source_revision':'a'*40,'resources':resources}}}
+        self.registration=upgrade.Registration(self.root,self.catalog)
+        self.guard=upgrade.Upgrade(self.policy,self.root,self.runner,self.registration)
         self.history=self.root/'history.json';self.history.write_text('history untouched')
 
     def runner(self, argv, timeout):
@@ -314,6 +321,40 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(self.engine.read_bytes(),self.old)
         self.assertEqual(self.records()[0]['status'],'rolled_back')
         self.assertEqual(self.states[upgrade.TIMER]['ActiveState'],'active')
+
+    def test_update_commits_matching_registry_record(self):
+        self.guard.apply(self.candidate)
+        record=json.loads(self.registration.snapshot())
+        self.assertEqual(record['provenance'],'managed_update')
+        self.assertEqual(record['resources'][upgrade.ENGINE]['sha256'],upgrade.digest(self.new))
+
+    def test_failed_registry_write_after_replace_restores_engine_and_absent_record(self):
+        original=self.registration.replace
+        def failing(expected,new):
+            original(expected,new)
+            if new is not None:raise OSError('registry sync failure')
+        with patch.object(self.registration,'replace',side_effect=failing):
+            with self.assertRaisesRegex(RuntimeError,'old engine and timer restored'):
+                self.guard.apply(self.candidate)
+        self.assertEqual(self.engine.read_bytes(),self.old)
+        self.assertIsNone(self.registration.current())
+        self.assertEqual(self.records()[0]['status'],'rolled_back')
+
+    def test_noop_preserves_existing_receipt_byte_for_byte(self):
+        self.engine.write_bytes(self.new)
+        receipt=self.registration.prepare('managed_install')
+        self.registration.replace(None,receipt)
+        self.assertEqual(self.guard.apply(self.candidate)['status'],'noop')
+        self.assertEqual(self.registration.snapshot(),receipt)
+        self.assertTrue(all(c[1]=='show' for c in self.calls))
+
+    def test_registered_drift_blocks_before_service_changes(self):
+        self.engine.write_bytes(self.new)
+        self.registration.replace(None,self.registration.prepare('managed_install'))
+        self.engine.write_bytes(self.old)
+        with self.assertRaisesRegex(ValueError,'registered_resources_require_review'):
+            self.guard.apply(self.candidate)
+        self.assertEqual(self.calls,[])
 
     def test_policy_matches_release_engine_and_installer_units(self):
         policy=json.loads((ROOT/'lib/guard_engine_policy.json').read_text())

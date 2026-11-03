@@ -171,6 +171,24 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(report['update_gate'],'manual_review_required')
         self.assertEqual(self.receipt.read_bytes(),before)
 
+    def test_lifecycle_restores_previous_receipt_bytes(self):
+        self.adopt();before=self.receipt.read_bytes()
+        managed=registry.Registration(self.root,self.catalog)
+        proposed=managed.prepare('managed_update')
+        managed.replace(before,proposed)
+        self.assertEqual(self.inspect()['status'],'registered_matches')
+        managed.restore(before,proposed)
+        self.assertEqual(self.receipt.read_bytes(),before)
+
+    def test_lifecycle_never_overwrites_external_receipt_change(self):
+        self.adopt();before=self.receipt.read_bytes()
+        managed=registry.Registration(self.root,self.catalog)
+        proposed=managed.prepare('managed_update')
+        self.receipt.write_text('external change')
+        with self.assertRaises(ValueError):managed.replace(before,proposed)
+        with self.assertRaises(ValueError):managed.restore(before,proposed)
+        self.assertEqual(self.receipt.read_text(),'external change')
+
     def test_catalog_matches_current_release_sources(self):
         policy=json.loads((ROOT/'lib/guard_engine_policy.json').read_text())
         release=registry.validate_catalog(registry.load_catalog())

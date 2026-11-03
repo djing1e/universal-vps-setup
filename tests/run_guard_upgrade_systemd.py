@@ -12,6 +12,7 @@ import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'lib'))
 import guard_engine_upgrade as upgrade
+import module_registry as registry
 
 PHRASE = 'TEST-VM-GUARD-UPGRADE'
 
@@ -68,10 +69,16 @@ def run(confirmation):
         known = {upgrade.digest(raw) for raw in (original,old,good,bad)}
         candidate = directory/'candidate.py'
         guard.backups = directory/'transactions'
+        original_registration=guard.registration
+        original_receipt=original_registration.current()
+        test_receipt=directory/'registry/components/auto-abuse-guard.json'
+        guard.registration=registry.Registration(catalog=copy.deepcopy(original_registration.catalog),receipt_path=test_receipt)
         results = []
 
         def stage_old():
             with guard.locked():
+                receipt=guard.registration.snapshot()
+                guard.registration.restore(None,receipt)
                 guard.command('stop',upgrade.TIMER)
                 guard.command('stop',upgrade.SERVICE)
                 live = upgrade.read_regular(guard.engine)[0]
@@ -82,6 +89,9 @@ def run(confirmation):
         def set_candidate(raw):
             upgrade.atomic_write(candidate,raw,0o600)
             guard.policy = fixture_policy(policy,old,raw)
+            catalog=copy.deepcopy(original_registration.catalog)
+            catalog['components'][registry.COMPONENT]['resources'][upgrade.ENGINE]['sha256']=upgrade.digest(raw)
+            guard.registration=registry.Registration(catalog=catalog,receipt_path=test_receipt)
 
         try:
             # 1: real replacement, both ExecStarts and active timer restored.
@@ -175,6 +185,7 @@ def run(confirmation):
             guard.command('start',upgrade.TIMER)
             guard.verify_timer(baseline)
             require(guard.engine.read_bytes()==original,'final engine restore failed')
+            require(original_registration.current()==original_receipt,'original release receipt changed')
             print('RESTORE PASS: original release + unchanged units + enabled/active timer',flush=True)
         (directory/'results.json').write_text(json.dumps(results,indent=2)+'\n')
         return results
