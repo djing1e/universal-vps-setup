@@ -51,5 +51,19 @@ jobs:
           sudo ip netns exec "$ns" python3 tests/check_spamhaus_direction.py
           sudo ip netns exec "$ns" nft delete table inet xtls_spamhaus_out
           sudo ip netns exec "$ns" python3 tests/check_spamhaus_udp_real.py
+          sudo ip netns exec "$ns" python3 tests/check_spamhaus_udp_bootstrap_real.py
       - name: C2 real nftables regression tests in a network namespace
         run: sudo python3 tests/check_c2_real_nft.py
+
+  ubuntu-crowdsec:
+    name: Ubuntu 24.04 packaged CrowdSec Hub
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install distribution package and stop agent metrics
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-remove crowdsec
+          sudo systemctl stop crowdsec
+      - name: Verify installed Hub state without metrics or file changes
+        run: sudo python3 tests/check_crowdsec_packaged_hub.py

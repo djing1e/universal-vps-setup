@@ -1085,13 +1085,53 @@ except Exception as error:
 PYFINGERPRINT
 }
 
+# Inspect JSON skips the Prometheus metrics request made by human inspect in
+# CrowdSec 1.4.x. A successful inspect alone also does NOT mean installed.
+# Return 0 = installed, 1 = known absent, 2 = unknown/error; never force tainted items.
+crowdsec_hub_item_state() (
+    local kind="$1" name="$2" work rc
+    case "$kind" in collections|parsers) ;; *) return 2 ;; esac
+    work=$(mktemp -d /tmp/crowdsec-hub-state.XXXXXXXX) || return 2
+    trap 'rm -rf "$work"' EXIT
+    if ! timeout 30 cscli "$kind" inspect "$name" -o json >"$work/item.json" 2>"$work/error"; then
+        if grep -Eiq 'unable to retrieve item|item .* not found|item .* doesn.t exist' "$work/error"; then
+            return 1
+        fi
+        cat "$work/error" >&2
+        echo "Не удалось проверить $kind: $name; повторная установка автоматически не запускается." >&2
+        return 2
+    fi
+    python3 - "$work/item.json" "$kind" "$name" <<'PY_HUB_STATE'
+import json,sys
+try:
+    with open(sys.argv[1]) as stream: item=json.load(stream)
+    if not isinstance(item,dict) or item.get('type')!=sys.argv[2] or item.get('name')!=sys.argv[3]:
+        raise ValueError('unexpected item identity or format')
+    installed=item.get('installed',False)  # omitted false in cscli 1.4.x
+    if type(installed) is not bool: raise ValueError('invalid installed state')
+    if installed: sys.exit(0)
+    if item.get('tainted') is True: raise ValueError('tainted item is not enabled; manual review required')
+    sys.exit(1)
+except (OSError,ValueError,TypeError) as error:
+    print('Не удалось определить состояние Hub: '+str(error),file=sys.stderr)
+    sys.exit(2)
+PY_HUB_STATE
+)
+
 # Install a Hub collection without overwriting Debian's packaged/tainted items.
 # A stale Hub index can cause "invalid download hash" on freshly installed systems.
 # Refresh the index only on that specific failure and retry once.
 crowdsec_ensure_collection() {
     local collection="$1" required="$2" output rc
-    if cscli collections inspect "$collection" >/dev/null 2>&1; then
+    if crowdsec_hub_item_state collections "$collection"; then
         echo "✓ Коллекция уже установлена: $collection (штатные/tainted файлы сохраняем)"
+        return 0
+    else
+        rc=$?
+    fi
+    if [[ "$rc" != 1 ]]; then
+        if [[ "$required" == required ]]; then return 1; fi
+        echo "ПРЕДУПРЕЖДЕНИЕ: состояние дополнительной коллекции $collection неизвестно; сохраняем файлы."
         return 0
     fi
 
@@ -1100,7 +1140,13 @@ crowdsec_ensure_collection() {
     if timeout 90 cscli collections install "$collection" >"$output" 2>&1; then
         cat "$output"
         rm -f "$output"
-        return 0
+        if crowdsec_hub_item_state collections "$collection"; then return 0; fi
+        if [[ "$required" != required ]]; then
+            echo "ПРЕДУПРЕЖДЕНИЕ: установка $collection не подтверждена; продолжаем без неё."
+            return 0
+        fi
+        echo "ОШИБКА: установка обязательной коллекции $collection не подтверждена."
+        return 1
     fi
 
     if grep -Eiq 'invalid download hash|Downloaded version doesn.t match index' "$output"; then
@@ -1110,14 +1156,20 @@ crowdsec_ensure_collection() {
             if timeout 90 cscli collections install "$collection" >"$output" 2>&1; then
                 cat "$output"
                 rm -f "$output"
-                return 0
+                if crowdsec_hub_item_state collections "$collection"; then return 0; fi
+                if [[ "$required" != required ]]; then
+                    echo "ПРЕДУПРЕЖДЕНИЕ: установка $collection не подтверждена; продолжаем без неё."
+                    return 0
+                fi
+                echo "ОШИБКА: установка обязательной коллекции $collection не подтверждена."
+                return 1
             fi
         fi
     fi
 
     cat "$output" >&2
     if grep -Eiq 'tainted|won.t enable unless --force' "$output"; then
-        echo "WARN: $collection имеет локальные изменения Debian; --force не применяется." >&2
+        echo "WARN: $collection имеет пакетные или локальные изменения; --force не применяется." >&2
     fi
     rm -f "$output"
     if [ "$required" = required ]; then
@@ -1129,6 +1181,27 @@ crowdsec_ensure_collection() {
 }
 
 crowdsec_install() {
+    local detail_log rc
+    local -a results
+    detail_log=$(mktemp /var/log/vps-setup-crowdsec.XXXXXXXX.log) || return 1
+    chmod 600 "$detail_log" || return 1
+    echo "Подробный журнал CrowdSec: $detail_log"
+    crowdsec_install_impl 2>&1 | tee "$detail_log"
+    results=("${PIPESTATUS[@]}")
+    rc=${results[0]}
+    if [[ "${results[1]}" != 0 ]]; then
+        echo 'ОШИБКА: подробный журнал CrowdSec записан не полностью.' >&2
+        [[ "$rc" != 0 ]] || rc=1
+    fi
+    log "CrowdSec: код $rc; подробный журнал: $detail_log"
+    if [[ "$rc" != 0 ]]; then
+        echo "Установка CrowdSec не завершена. Причина сохранена в $detail_log"
+        echo 'Не запускайте полный стек повторно: повторная установка доступна в разделе CrowdSec.'
+    fi
+    return "$rc"
+}
+
+crowdsec_install_impl() {
     echo ""
     echo "=== [1/7] Установка CrowdSec ==="
 
@@ -1315,7 +1388,7 @@ EOF
     # Debian 13 provides crowdsecurity/sshd-logs with sshd-session support
     # already backported. Do not depend on upstream-only parser filenames,
     # or rewrite a distribution-managed parser.
-    if ! cscli parsers inspect crowdsecurity/sshd-logs >/dev/null 2>&1; then
+    if ! crowdsec_hub_item_state parsers crowdsecurity/sshd-logs; then
         echo "ОШИБКА: SSH parser crowdsecurity/sshd-logs не установлен."
         echo "Проверьте: cscli parsers list"
         return 1
@@ -2507,7 +2580,7 @@ show_blocklists_status() {
         echo "  v4 сетей: $(ipset list asn-blacklist-v4 2>/dev/null | awk '/Number of entries/{print $4}')   v6: $(ipset list asn-blacklist-v6 2>/dev/null | awk '/Number of entries/{print $4}')"
         iptables-save 2>/dev/null | grep -c asn-blacklist | xargs echo "  правил в iptables:"
     else
-        echo "  не установлен (пункт 12)"
+        echo "  не установлен (Защита → AS-списки)"
     fi
     echo ""
     echo "── Threat-Intel (Spamhaus + FireHOL L1) ──"
@@ -2515,7 +2588,7 @@ show_blocklists_status() {
         echo "  v4 сетей: $(ipset list threat-block-v4 2>/dev/null | awk '/Number of entries/{print $4}')   v6: $(ipset list threat-block-v6 2>/dev/null | awk '/Number of entries/{print $4}')"
         iptables-save 2>/dev/null | grep -c threat-block | xargs echo "  правил в iptables:"
     else
-        echo "  не установлен (пункт 16)"
+        echo "  не установлен (Защита → Anti-Abuse)"
     fi
 }
 
@@ -4951,7 +5024,7 @@ rn_node_logging() {
   echo "╚══════════════════════════════════════════╝"
   echo ""
   echo "  Дописывает логирование в существующую ноду."
-  echo "  (Docker и зеркала ставятся в пункте 1 → 8 «Docker + зеркала».)"
+  echo "  (Docker и зеркала ставятся в разделе «Установка компонентов → Docker».)"
   echo ""
   echo "  Будет выполнено (по шагам, с подтверждением):"
   echo "    1. Патч docker-compose.yml: volume /var/log/remnanode"
@@ -8569,11 +8642,10 @@ setup_threat_blocklist() {
 }
 
 # =====================================================
-# МОДУЛЬ 0: ОДНА КНОПКА (полный prod-стек) + ПОЛНАЯ ВЫЧИСТКА
+# МОДУЛЬ 0: УНИВЕРСАЛЬНАЯ УСТАНОВКА + ПОЛНАЯ ВЫЧИСТКА
 # =====================================================
-# Накатывает весь стек в правильной последовательности с логами, пошаговой
-# диагностикой и сводным отчётом. Без TG. Продолжает при ошибках (не падает),
-# в конце печатает OK/FAIL по каждому шагу.
+# Начальная настройка без дополнительных сетевых и Anti-Abuse модулей.
+# Критические ошибки останавливают установку; все выполненные шаги видны в отчёте.
 
 # ── раннер шага: логирует, ловит код возврата, не роняет скрипт ──
 ONEBTN_RESULTS=()
@@ -8608,118 +8680,93 @@ onebtn_step() {
     return 0
 }
 
+# Base tuning uses the running distribution kernel; never call do_sysctl_setup
+# here because that legacy wrapper also installs XanMod.
+do_base_network_tuning() {
+    kt_apply_sysctl || return 1
+    if [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" != bbr ]] ||
+       [[ "$(sysctl -n net.core.default_qdisc 2>/dev/null)" != fq ]]; then
+        rn_error "Базовый тюнинг: BBR / fq не подтверждены на текущем ядре."
+        return 1
+    fi
+    rn_success "Базовый тюнинг сети применён на текущем ядре."
+}
+
 setup_one_button() {
     print_header
-    echo "╔══════════════════════════════════════════╗"
-    echo "║   🚀 УСТАНОВИТЬ ВСЁ (полный prod-стек)   ║"
-    echo "╚══════════════════════════════════════════╝"
-    echo ""
-    echo "  Накатит в правильной последовательности:"
-    echo "    1. База: SSH+UFW+тюнинг ядра+XanMod(BBRv3)+fail2ban"
-    echo "    2. CrowdSec (поведенческий IPS, БЕЗ Traffic-Guard)"
-    echo "    3. AS_Network_List — РФ-госсети → INPUT"
-    echo "    4. Threat-Intel — Spamhaus+FireHOL L1 → INPUT"
-    echo "    5. Anti-DDoS vpsguard — nft per-IP лимиты"
-    echo ""
-    rn_warn "ВНИМАНИЕ: ставить ТОЛЬКО на свежую ноду / эталон."
-    rn_warn "CrowdSec сохраняет существующий UFW; другие шаги полного стека могут изменить firewall."
-    rn_warn "XanMod заменит ядро (reboot спросим в конце)."
-    rn_warn "vpsguard спросит порты/лимиты на своём шаге."
-    echo ""
-    echo "  Порядок при ошибке шага: ПРОДОЛЖАТЬ, отчёт в конце."
-    echo ""
-    read -e -p "Поехали? Введи 'yes' для старта: " _go
-    [[ "$_go" == "yes" ]] || { echo "Отменено."; return; }
+    echo 'VPS / Универсальная установка'
+    echo
+    echo '  1. Обновить системные пакеты (APT)'
+    echo "  2. Настроить SSH: ключ и порт (по умолчанию ${DEFAULT_SSH_PORT})"
+    echo '  3. Настроить UFW: входящие порты'
+    echo '  4. Базовый тюнинг сети: BBR, fq, буферы и conntrack'
+    echo '  5. Настроить автообновления ОС'
+    echo '  6. Установить fail2ban для SSH'
+    echo '  7. Установить CrowdSec и Firewall Bouncer'
+    echo
+    echo 'Не входят: DNS, XanMod, Anti-DDoS, Anti-Abuse и AS-списки.'
+    echo 'Docker и Remnanode устанавливаются отдельно.'
+    echo
+    rn_warn 'Для начальной настройки VPS. Это не безопасное обновление работающей ноды.'
+    rn_warn 'Изменятся SSH, firewall и sysctl; APT может перезапустить службы.'
+    rn_warn 'Сохраните консольный доступ провайдера. Порт SSH и порты UFW будут запрошены.'
+    echo 'При ошибке пакетов, SSH или UFW установка остановится. Остальные ошибки попадут в отчёт.'
+    local answer
+    read -e -r -p "Начать установку? Введите yes (0 — назад): " answer || return 0
+    [[ "$answer" == yes ]] || { echo 'Отменено.'; return 0; }
 
     ONEBTN_RESULTS=()
-    KT_REBOOT_NEEDED=0
-    local _start; _start=$(date +%s)
-    log "=== [ONE-BUTTON] НАЧАЛО полного наката ==="
+    local started finished critical_failed=0
+    started=$(date +%s)
+    log '=== [ONE-BUTTON] НАЧАЛО универсальной установки ==='
 
-    # Preflight: гарантируем loopback ACCEPT и ждём готовности DNS (после ребута resolved
-    # стартует с гонкой — без этого скачивание списков ловит таймаут резолвинга).
-    ensure_loopback_accept
-    echo ""
-    echo "▶ Preflight: проверка DNS…"
-    if wait_for_dns 15; then
-        rn_success "DNS резолвит — продолжаю"
+    onebtn_step 'Системные пакеты' do_update_packages
+    if [[ "${ONEBTN_RESULTS[-1]}" == OK* ]]; then
+        onebtn_step "SSH (ключ + порт ${DEFAULT_SSH_PORT})" do_ssh_setup
     else
-        rn_warn "DNS не резолвит за 30с — сетевые шаги могут упасть (используется локальный fallback где есть)"
+        critical_failed=1
+    fi
+    if [[ "$critical_failed" == 0 && "${ONEBTN_RESULTS[-1]}" == OK* ]]; then
+        onebtn_step 'UFW: входящие порты' do_ufw_setup
+    else
+        critical_failed=1
+    fi
+    if [[ "$critical_failed" == 0 && "${ONEBTN_RESULTS[-1]}" == OK* ]]; then
+        onebtn_step 'Базовый тюнинг сети (текущее ядро)' do_base_network_tuning
+        onebtn_step 'Автообновления ОС' do_autoupgrade
+        onebtn_step 'fail2ban: защита SSH' do_fail2ban
+        onebtn_step 'CrowdSec + Firewall Bouncer' crowdsec_install
+    else
+        critical_failed=1
+        rn_error 'Установка остановлена: пакеты, SSH или UFW не настроены успешно.'
     fi
 
-    # ── Шаг 1: база (вкл. тюнинг ядра + XanMod автоматически) ──
-    onebtn_step "База: пакеты" do_update_packages
-    onebtn_step "База: SSH (ключ+порт ${DEFAULT_SSH_PORT})" do_ssh_setup
-    if [[ "${ONEBTN_RESULTS[-1]}" == FAIL* ]]; then
-        rn_error "SSH не настроен; полный накат остановлен во избежание потери доступа."
-        return 1
-    fi
-    onebtn_step "База: UFW" do_ufw_setup
-    if [[ "${ONEBTN_RESULTS[-1]}" == FAIL* ]]; then
-        rn_error "UFW не настроен; полный накат остановлен во избежание потери доступа."
-        return 1
-    fi
-    onebtn_step "База: тюнинг ядра/сети + XanMod" do_sysctl_setup
-    onebtn_step "База: автообновления" do_autoupgrade
-    onebtn_step "База: fail2ban" do_fail2ban
-
-    # ── Шаг 2: CrowdSec (без TG) ──
-    onebtn_step "CrowdSec (поведенческий IPS)" crowdsec_install
-
-    # ── Шаг 3: AS_Network_List (РФ-госсети → INPUT) ──
-    onebtn_step "AS_Network_List (РФ-госсети)" asb_install_iptables
-
-    # ── Шаг 4: Threat-Intel (Spamhaus+FireHOL → INPUT) ──
-    onebtn_step "Threat-Intel (Spamhaus+FireHOL L1)" tib_install
-
-    # ── Шаг 5: Anti-DDoS vpsguard (интерактивный — спросит параметры) ──
-    echo ""
-    rn_info "Следующий шаг (vpsguard) спросит порты/лимиты."
-    onebtn_step "Anti-DDoS vpsguard (nft per-IP)" ad_install
-
-    # ── Сводный отчёт ──
-    local _end; _end=$(date +%s)
-    print_header
-    echo "╔══════════════════════════════════════════╗"
-    echo "║   ОТЧЁТ: полный накат завершён           ║"
-    echo "╚══════════════════════════════════════════╝"
-    echo ""
+    finished=$(date +%s)
+    echo
+    echo '=== ОТЧЁТ: универсальная установка ==='
     local okc=0 failc=0 skipc=0 line
     for line in "${ONEBTN_RESULTS[@]}"; do
-        if [[ "$line" == OK* ]]; then
-            echo "  ✔ ${line}"; okc=$((okc+1))
-        elif [[ "$line" == SKIP* ]]; then
-            echo "  ⊘ ${line}"; skipc=$((skipc+1))
-        else
-            echo "  ✗ ${line}"; failc=$((failc+1))
-        fi
+        echo "  $line"
+        case "$line" in
+            OK*) okc=$((okc+1)) ;;
+            SKIP*) skipc=$((skipc+1)) ;;
+            *) failc=$((failc+1)) ;;
+        esac
     done
-    echo ""
-    echo "  Итого: ${okc} OK, ${failc} FAIL, ${skipc} SKIP   (за $(( _end - _start ))с)"
+    echo "Итого: ${okc} OK, ${failc} FAIL, ${skipc} SKIP (за $((finished - started))с)"
     log "=== [ONE-BUTTON] КОНЕЦ: ${okc} OK, ${failc} FAIL, ${skipc} SKIP ==="
-    echo ""
-    if [ "$failc" -gt 0 ]; then
-        rn_warn "Есть упавшие шаги — глянь лог: $LOG_FILE"
-        rn_warn "Каждый шаг можно доустановить вручную из главного меню."
+    if (( critical_failed || failc )); then
+        rn_warn "Установка не завершена полностью. Журнал: $LOG_FILE"
+        rn_warn 'Повторите только неудачный шаг через «Отдельные компоненты». Не запускайте весь сценарий повторно.'
+        return 1
+    fi
+    if (( skipc )); then
+        rn_warn 'Установка завершена с пропущенными шагами. Проверьте отчёт выше.'
     else
-        rn_success "Все шаги прошли. Проверь: nft list table inet vpsguard | grep -c meter"
+        rn_success 'Универсальная установка завершена.'
     fi
-    echo ""
-    echo "  Быстрая проверка стека:"
-    echo "    • BBR:        sysctl net.ipv4.tcp_congestion_control"
-    echo "    • CrowdSec:   cscli metrics | head"
-    echo "    • AS-список:  ipset list asn-blacklist-v4 | grep entries"
-    echo "    • Threat:     ipset list threat-block-v4 | grep entries"
-    echo "    • vpsguard:   vpsguard-status"
-    echo "    • Ноды/xray:  docker ps; ss -tlnp | grep -E ':443|:10085'"
-    echo ""
-
-    # ── XanMod reboot (как обычно — спрашиваем) ──
-    if [ "${KT_REBOOT_NEEDED:-0}" = "1" ]; then
-        rn_warn "XanMod установлен — для активации BBRv3 нужна ПЕРЕЗАГРУЗКА."
-        read -e -p "Перезагрузить сейчас? (y/n): " _rb
-        [[ "$_rb" == "y" ]] && { log "[ONE-BUTTON] reboot по запросу"; reboot; }
-    fi
+    echo 'Проверка состояния: главное меню → 5 → 1.'
+    return 0
 }
 
 # =====================================================
@@ -8878,7 +8925,7 @@ cleanup_legacy() {
     log "=== [CLEANUP] КОНЕЦ полной вычистки ==="
     echo ""
     rn_success "Вычистка завершена. Фаервол в голом состоянии."
-    rn_info "Теперь можно ставить начисто: пункт 0 (одна кнопка) или модули по отдельности."
+    rn_info "Теперь можно ставить начисто: раздел «Установка компонентов»."
     echo ""
     echo "  Проверка чистоты:"
     echo "    ipset list -n            (не должно быть asn/threat/SCANNERS/crowdsec)"
@@ -9341,7 +9388,7 @@ setup_udp_abuse() {
     echo "  0) Назад"
     read -e -r -p "Выбор: " choice
     case "$choice" in
-      1) bash "$f" install || rc=$? ;;
+      1) spamhaus_output_install_checked || rc=$? ;;
       2) bash "$f" status || rc=$? ;;
       3) if [[ -x /usr/local/sbin/xtls-udp-abuse ]]; then /usr/local/sbin/xtls-udp-abuse restore || rc=$?; else echo "Сначала установите"; fi ;;
       4) bash "$f" enable-block || rc=$? ;;
@@ -9692,9 +9739,94 @@ XTLS_SPAMHAUS_OUTPUT_MODULE_END
 }
 spamhaus_udp_require_installed() {
     local target=/usr/local/sbin/xtls-spamhaus-udp
-    [[ -f "$target" && ! -L "$target" ]] || { echo 'Сначала установите UDP-расширение'; return 1; }
+    [[ -f "$target" && ! -L "$target" ]] || { echo 'UDP-защита ещё не установлена. Выберите 1: установить и подготовить сети.'; return 1; }
     printf '%s  %s\n' 3a9a538570385684e01514cb38f48937870780dae7f593983b3f6b6b55479f5a "$target" |
         sha256sum -c --status || { echo 'Неизвестная версия UDP-модуля: требуется ручная проверка'; return 1; }
+}
+
+# A UDP guard depends on the shared observer's chain, populated sets and boot unit.
+# Probing a fresh VPS is expected to fail quietly; it is not an nft syntax error.
+spamhaus_output_ready() {
+    nft -j list table inet xtls_spamhaus_out 2>/dev/null | python3 -c '
+import json,sys
+try:
+    rows=json.load(sys.stdin)["nftables"]
+    for v,kind in ((4,"ipv4_addr"),(6,"ipv6_addr")):
+        sets=[x["set"] for x in rows if x.get("set",{}).get("name")==f"v{v}"]
+        if len(sets)!=1 or sets[0].get("type")!=kind or not sets[0].get("elem"): sys.exit(1)
+    chains=[x["chain"] for x in rows if x.get("chain",{}).get("name")=="output"]
+    if len(chains)!=1 or chains[0].get("hook")!="output" or chains[0].get("type")!="filter": sys.exit(1)
+except (ValueError,KeyError,TypeError): sys.exit(1)
+' || return 1
+    [[ "$(systemctl show --value --property=LoadState xtls-spamhaus-output-restore.service 2>/dev/null)" == loaded ]]
+}
+
+# Use the bundled observer, never replace unknown files or local unit overrides.
+spamhaus_output_install_checked() (
+    set -euo pipefail
+    umask 077
+    local work target=/usr/local/sbin/xtls-spamhaus-output
+    work=$(mktemp -d /tmp/xtls-spamhaus-base.XXXXXXXX) || return 1
+    trap 'rm -rf "$work"' EXIT
+    xtls_spamhaus_out_write_module > "$work/observer.sh"
+    bash -n "$work/observer.sh" || return 1
+    python3 - "$work/observer.sh" <<'PY_BASE_PREFLIGHT' || return 1
+import hashlib,os,re,stat,sys
+from pathlib import Path
+source=Path(sys.argv[1]).read_bytes()
+target=Path('/usr/local/sbin/xtls-spamhaus-output')
+known={hashlib.sha256(source).hexdigest(), '5adc3759693949320b108e8e98ae59029aed810e826554589271dd59e9b1521d'}
+def regular(path):
+    info=path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_uid!=0 or info.st_gid!=0 or info.st_mode & 0o022:
+        raise ValueError(f'нестандартный файл: {path}')
+try:
+    for directory in (Path('/etc/xtls-spamhaus-output'),Path('/usr/local/sbin'),Path('/etc/systemd/system')):
+        if directory.is_symlink(): raise ValueError(f'symlink: {directory}')
+    if target.exists() or target.is_symlink():
+        regular(target)
+        if hashlib.sha256(target.read_bytes()).hexdigest() not in known:
+            raise ValueError('неизвестная версия Spamhaus OUTPUT; автоматическая замена отменена')
+    units=re.findall(r"cat >(/etc/systemd/system/xtls-spamhaus-output-[^ ]+) <<'UNIT'\n(.*?)\nUNIT", source.decode(), re.S)
+    if len(units)!=3: raise ValueError('не удалось проверить шаблоны unit')
+    for name,body in units:
+        path=Path(name)
+        if path.exists() or path.is_symlink():
+            regular(path)
+            if path.read_bytes()!=(body+'\n').encode(): raise ValueError(f'локальные изменения unit: {path}')
+        override=Path(str(path)+'.d')
+        if override.is_symlink() or (override.exists() and any(override.iterdir())):
+            raise ValueError(f'локальные переопределения: {override}')
+    config=Path('/etc/xtls-spamhaus-output')
+    if config.exists():
+        for path in config.iterdir():
+            if path.is_symlink(): raise ValueError(f'symlink в конфигурации: {path}')
+except (OSError,ValueError) as error:
+    print('Подготовка Spamhaus отменена: '+str(error),file=sys.stderr)
+    sys.exit(1)
+PY_BASE_PREFLIGHT
+    # With no known executable, do not adopt a similarly named foreign table.
+    if [[ ! -e "$target" ]] && nft list table inet xtls_spamhaus_out >/dev/null 2>&1; then
+        echo 'Таблица Spamhaus есть, но её модуль неизвестен. Нужна ручная проверка.'
+        return 1
+    fi
+    bash "$work/observer.sh" install || return 1
+)
+
+spamhaus_udp_prepare_source() {
+    if spamhaus_output_ready; then return 0; fi
+    echo 'Подготовка UDP-защиты: базовые наборы Spamhaus ещё не готовы.'
+    echo '1/2: установить Spamhaus OUTPUT и загрузить сети IPv4/IPv6.'
+    echo '2/2: установить UDP-расширение в Observe; существующий режим сохранить.'
+    echo 'Блокировка не включается автоматически. Локальные изменения файлов не заменяются.'
+    spamhaus_output_install_checked || {
+        echo 'Не удалось подготовить сети Spamhaus. UDP-расширение не запускается.'
+        return 1
+    }
+    spamhaus_output_ready || {
+        echo 'Наборы Spamhaus или boot-unit не готовы после установки. UDP-расширение не запускается.'
+        return 1
+    }
 }
 
 spamhaus_udp_install() (
@@ -9704,10 +9836,6 @@ spamhaus_udp_install() (
     local unit=/etc/systemd/system/xtls-spamhaus-udp-restore.service
     local config=/etc/xtls-spamhaus-udp work path
     local base=https://raw.githubusercontent.com/djing1e/universal-vps-setup/0dbef9a93c7b9ff109bd584856e45dbe2807419e/modules
-    nft list chain inet xtls_spamhaus_out output >/dev/null || return 1
-    [[ "$(systemctl show --value --property=LoadState xtls-spamhaus-output-restore.service)" == loaded ]] || {
-        echo 'Сначала установите Spamhaus OUTPUT Observe'; return 1;
-    }
     [[ ! -L "$config" ]] || { echo 'Каталог UDP — symlink; требуется ручная проверка'; return 1; }
     for path in "$target" "$unit"; do
         [[ ! -L "$path" ]] || { echo "Symlink: $path; требуется ручная проверка"; return 1; }
@@ -9722,6 +9850,7 @@ spamhaus_udp_install() (
     python3 -c 'import sys; compile(open(sys.argv[1], "rb").read(), sys.argv[1], "exec")' "$work/module.py" || return 1
     [[ ! -e "$target" ]] || cmp -s "$target" "$work/module.py" || { echo 'Неизвестный установленный UDP-модуль; замена отменена'; return 1; }
     [[ ! -e "$unit" ]] || cmp -s "$unit" "$work/xtls-spamhaus-udp-restore.service" || { echo 'Нестандартный UDP unit; замена отменена'; return 1; }
+    spamhaus_udp_prepare_source || return 1
     systemd-analyze verify "$work/xtls-spamhaus-udp-restore.service" || return 1
     install -d -m 700 "$config" || return 1
     if [[ ! -e "$target" ]]; then install -m 755 "$work/module.py" "$target" || return 1; fi
@@ -9731,7 +9860,7 @@ spamhaus_udp_install() (
     systemctl enable --now xtls-spamhaus-udp-restore.service || return 1
     echo 'UDP-расширение установлено. Существующие режим и исключения сохранены.'
     if [[ ! -f "$config/exemptions.txt" ]]; then
-        echo 'Перед включением DROP задайте исключения через пункт 4 этого подменю.'
+        echo 'Перед включением DROP задайте исключения через пункт 5 этого подменю.'
     fi
 )
 
@@ -9787,7 +9916,7 @@ spamhaus_udp_enable() {
         return
     fi
     [[ "$mode" == observe ]] || { echo 'Неизвестный режим; требуется ручная проверка'; return 1; }
-    [[ -f /etc/xtls-spamhaus-udp/exemptions.txt ]] || { echo 'Сначала задайте исключения через пункт 4'; return 1; }
+    [[ -f /etc/xtls-spamhaus-udp/exemptions.txt ]] || { echo 'Сначала задайте исключения через пункт 5'; return 1; }
     echo 'UDP к сетям Spamhaus будет заблокирован. Через 5 минут сработает автоотключение.'
     read -e -r -p 'Введите ENABLE-SPAMHAUS-UDP-DROP: ' answer || return 1
     [[ "$answer" == ENABLE-SPAMHAUS-UDP-DROP ]] || { echo 'Отменено'; return 0; }
@@ -9820,21 +9949,24 @@ setup_spamhaus_udp_drop() {
     local choice
     while true; do
         echo '=== UDP DROP по сетям Spamhaus ==='
-        echo '1) Статус и счётчики'
-        echo '2) Включить DROP (с автоотключением через 5 минут)'
-        echo '3) Отключить DROP'
-        echo '4) Исключения: разрешённые адреса (при Observe)'
+        if [[ ! -f /usr/local/sbin/xtls-spamhaus-udp ]]; then
+            echo 'Не установлено. Начните с пункта 1 — он подготовит все зависимости.'
+        fi
+        echo '1) Установить / подготовить UDP-защиту (включая сети Spamhaus)'
+        echo '2) Статус и счётчики'
+        echo '3) Включить DROP (с автоотключением через 5 минут)'
+        echo '4) Отключить DROP'
+        echo '5) Исключения: разрешённые адреса (при Observe)'
         echo '6) Доступ проверен: оставить DROP включённым'
-        echo '9) Установка / проверка расширения'
         echo '0) Назад'
-        read -e -r -p 'Выбор [1-4, 6, 9 / 0]: ' choice || return 0
+        read -e -r -p 'Выбор [0-6]: ' choice || return 0
         case "$choice" in
-            1) if spamhaus_udp_require_installed; then /usr/bin/python3 /usr/local/sbin/xtls-spamhaus-udp status || echo 'Не удалось прочитать UDP-статус'; fi ;;
-            2) spamhaus_udp_enable || echo 'Проверьте статус и защитный таймер' ;;
-            3) if spamhaus_udp_require_installed; then /usr/bin/python3 /usr/local/sbin/xtls-spamhaus-udp disable-block || echo 'Отключение не подтверждено; проверьте статус'; fi ;;
-            4) spamhaus_udp_exemptions || echo 'Исключения не изменены' ;;
+            1) spamhaus_udp_install || echo 'Установка не завершена. DROP автоматически не включался; проверьте причину выше.' ;;
+            2) if spamhaus_udp_require_installed; then /usr/bin/python3 /usr/local/sbin/xtls-spamhaus-udp status || echo 'Не удалось прочитать UDP-статус'; fi ;;
+            3) spamhaus_udp_enable || echo 'Проверьте статус и защитный таймер' ;;
+            4) if spamhaus_udp_require_installed; then /usr/bin/python3 /usr/local/sbin/xtls-spamhaus-udp disable-block || echo 'Отключение не подтверждено; проверьте статус'; fi ;;
+            5) spamhaus_udp_exemptions || echo 'Исключения не изменены' ;;
             6) spamhaus_udp_keep || echo 'Подтверждение не завершено' ;;
-            9) spamhaus_udp_install || echo 'Установка не завершена' ;;
             0) return 0 ;;
             *) echo 'Неверный выбор' ;;
         esac
@@ -9866,7 +9998,7 @@ setup_spamhaus_out_observe() {
     while true; do
         rc=0
         echo "=== Spamhaus: сети и журнал совпадений ==="
-        echo "Журналирование не меняет режим UDP DROP (управление: 16 → 3)."
+        echo "Журналирование не меняет режим UDP DROP (управление: Защита → Anti-Abuse → 3)."
         echo "1) Установить / обновить Spamhaus OUTPUT (режим UDP сохраняется)"
         echo "2) Обновить фид сейчас"
         echo "3) Статус и счётчики"
@@ -9939,7 +10071,7 @@ guard_engine_menu_action() (
         *) echo 'Проверка не разрешила действие'; return 1 ;;
     esac
     if [[ "$action" == check ]]; then
-        echo 'Доступно обновление движка. Для применения выберите пункт 6.'
+        echo 'Доступно обновление движка. Применение: «Обновления → Guard: обновить» или пункт 6 в меню Guard.'
         return 0
     fi
     if [[ "$action" == install ]]; then
@@ -10065,12 +10197,17 @@ setup_antiabuse_center() {
     local choice
     while true; do
         echo ""
-        echo "=== Anti-Abuse & Threat Intelligence ==="
-        echo "  1) Spamhaus + FireHOL L1 (INPUT)"
+        echo "=== VPS / Защита / Anti-Abuse ==="
+        echo "  ВХОДЯЩИЕ ПОДКЛЮЧЕНИЯ"
+        echo "  1) Spamhaus + FireHOL: блокировать источники из списков"
+        echo ""
+        echo "  ИСХОДЯЩИЙ ТРАФИК НОДЫ"
         echo "  2) TCP DROP — C2 IP:порт"
         echo "  3) UDP DROP — сети Spamhaus"
-        echo "  4) Общий статус (только чтение)"
+        echo "  4) Все защиты: статус и счётчики (без изменений)"
         echo "  5) Spamhaus — обновление сетей и журнал совпадений"
+        echo ""
+        echo "  АНАЛИЗ И ДОПОЛНИТЕЛЬНЫЕ ЗАЩИТЫ"
         echo "  6) Анализ подписок — Auto Abuse Guard (без автобана)"
         echo "  7) SMTP25 Guard (опциональная исходящая защита)"
         echo "  8) Port Scan Guard (Observe)"
@@ -10145,107 +10282,205 @@ antiabuse_center_status() {
 }
 
 # =====================================
-# ГЛАВНОЕ МЕНЮ
+# НАВИГАЦИЯ VPS MANAGER
 # =====================================
-# Инициализация лога
-mkdir -p "$(dirname $LOG_FILE)"
-log "=== Запуск vps-setup.sh ==="
+# Rows are fixed application data: key|label|page/action|function|argument.
+# Never evaluate terminal input as code or use it as a function name.
+vps_menu() {
+    local title="$1" hint="$2" row key label kind callback argument choice found rc
+    shift 2
+    local -a rows=("$@")
+    while true; do
+        print_header
+        printf '%s\n\n' "$title"
+        printf '%s\n\n' "$hint"
+        for row in "${rows[@]}"; do
+            IFS='|' read -r key label kind callback argument <<< "$row"
+            printf '  %2s) %s\n' "$key" "$label"
+        done
+        if [[ "$title" == 'VPS / Главное меню' ]]; then
+            echo '   0) Выход'
+        else
+            echo '   0) Назад'
+        fi
+        echo
+        read -e -r -p 'Выбор: ' choice || return 0
+        [[ "$choice" == 0 ]] && return 0
+        found=0
+        for row in "${rows[@]}"; do
+            IFS='|' read -r key label kind callback argument <<< "$row"
+            [[ "$choice" == "$key" ]] || continue
+            found=1
+            rc=0
+            if [[ -n "$argument" ]]; then
+                "$callback" "$argument" || rc=$?
+            else
+                "$callback" || rc=$?
+            fi
+            if [[ "$kind" == action ]]; then
+                [[ "$rc" == 0 ]] || printf '\nДействие завершилось с кодом %s. Проверьте сообщения выше.\n' "$rc"
+                read -e -r -p 'Enter — вернуться в раздел…' choice || return 0
+            fi
+            break
+        done
+        if [[ "$found" == 0 ]]; then
+            echo 'Такого пункта нет. Выберите номер из текущего меню.'
+            read -e -r -p 'Enter — продолжить…' choice || return 0
+        fi
+    done
+}
 
-while true; do
-    print_header
-    echo " 00) 🚀 УСТАНОВИТЬ ВСЁ (полный prod-стек, одна кнопка)"
-    echo "     база+тюнинг+XanMod+CrowdSec+AS+Threat+vpsguard"
-    echo ""
-    echo "  1) Базовая настройка сервера"
-    echo "     SSH, UFW, sysctl, BBR, fail2ban, автообновления"
-    echo ""
-    echo "  2) Управление IPv6"
-    echo "     включить / отключить"
-    echo ""
-    echo "  3) CrowdSec (поведенческий IPS)"
-    echo "     установить / удалить / статус"
-    echo ""
-    echo "  4) NextDNS"
-    echo "     включить / отключить DoT через systemd-resolved"
-    echo ""
-    echo "  5) Журнал атак"
-    echo "     SSH брутфорс, fail2ban, CrowdSec"
-    echo ""
-    echo "  6) Статус системы"
-    echo ""
-    echo "  7) Лог действий скрипта"
-    echo "     $LOG_FILE"
-    echo ""
-    echo "  8) GeoBlock"
-    echo "     блокировка по странам (whitelist)"
-    echo ""
-    echo "  9) Swap"
-    echo "     создать / удалить / настроить"
-    echo ""
-    echo " 10) Установка remnanode"
-    echo "     встроенный / eGamesAPI / классический (docs.rw)"
-    echo ""
-    echo " 11) Шейпер скорости"
-    echo "     ограничение скорости пользователей (tc/nft)"
-    echo ""
-    echo " 12) AS_Network_List — блокировка госсетей РФ"
-    echo "     iptables/ipset + systemd timer; nftables + cron"
-    echo ""
-    echo " 13) WARP-native (Cloudflare WARP)"
-    echo "     wgcf-туннель для обхода geo-блоков (Gemini и т.п.)"
-    echo "     локально или по SSH на выбранную ноду"
-    echo ""
-    echo " 14) Тюнинг ядра/сети — RPS/conntrack/sysctl/BBR"
-    echo "     потолок юзеров и PPS; не трогает фаервол"
-    echo ""
-    echo " 15) Anti-DDoS — nft per-IP лимиты + fleet-sync"
-    echo "     поверх UFW/CrowdSec: SYN/UDP-флуд, connlimit"
-    echo ""
-    echo " 16) Anti-Abuse & Threat Intelligence — Spamhaus / TCP C2 / UDP"
-    echo "     единый раздел управления и общий статус"
-    echo ""
-    echo " 17) Probe-сервер — доступность IP снаружи/из РФ"
-    echo "     временный HTTP/HTTPS на своих портах, лог подключений;"
-    echo "     проверить новый IP на блок ДО того как вешать домен"
-    echo ""
-    echo " 18) TCP C2 Anti-Abuse — прямой вход (также в п.16)"
-    echo "     обновление раз в 6 часов; блокировка включается вручную"
-    echo ""
-    echo " 19) UDP Anti-Abuse — прямой вход (также в п.16)"
-    echo ""
-    echo "  W) 🧹 Полная вычистка (откат всего начисто)"
-    echo "     снести все слои перед чистым накатом"
-    echo ""
-    echo "  0) Выход"
-    echo ""
-    read -e -p "Выберите действие [00=всё / 0-19 / W=вычистка]: " MAIN_CHOICE
-
-    case $MAIN_CHOICE in
-        00|s|S|star|"*"|★) setup_one_button ;;
-        1) setup_base ;;
-        2) setup_ipv6 ;;
-        3) setup_crowdsec ;;
-        4) setup_nextdns ;;
-        5) show_security_log ;;
-        6) show_system_status ;;
-        7) show_script_log ;;
-        8) setup_geoblock ;;
-        9) setup_swap ;;
-       10) setup_remnanode ;;
-       11) setup_speed_shaper ;;
-       12) setup_as_blacklist ;;
-       13) setup_warp ;;
-       14) setup_kernel_tuning ;;
-       15) setup_antiddos ;;
-       16) setup_antiabuse_center ;;
-       17) setup_probe_server ;;
-       18) setup_c2_feed ;;
-       19) setup_udp_abuse ;;
-        W|w|wipe|WIPE) cleanup_legacy ;;
-        0) log "=== Выход из vps-setup.sh ==="; echo "Выход."; exit 0 ;;
-        *) echo "Неверный выбор." ;;
+# This is a preview of ONE existing operation, not a dependency planner.
+# Existing component dialogs keep their confirmations and validation.
+vps_install_entry() {
+    local component="$1" title details callback answer
+    case "$component" in
+        packages) title='Обновление системных пакетов'; callback=do_update_packages
+            details='APT может обновить установленные пакеты и перезапустить их службы. Это не обновление модулей менеджера.' ;;
+        ssh) title='Настройка SSH'; callback=do_ssh_setup
+            details="Изменяет ключ и порт SSH (по умолчанию ${DEFAULT_SSH_PORT}). Проверьте доступ через консоль провайдера." ;;
+        ufw) title='Настройка UFW'; callback=do_ufw_setup
+            details='Изменяет входящие правила firewall. На работающей ноде сначала проверьте порты сервисов.' ;;
+        autoupdates) title='Автообновления Debian / Ubuntu'; callback=do_autoupgrade
+            details='Изменяет настройки автоматического обновления системных пакетов.' ;;
+        fail2ban) title='Защита SSH: fail2ban'; callback=do_fail2ban
+            details='Устанавливает и настраивает fail2ban. Может включить блокировку источников SSH-атак.' ;;
+        docker) title='Docker и зеркала'; callback=do_docker_mirrors
+            details='Открывает настройку Docker и зеркал. Это установка/настройка, а не безопасное обновление работающих контейнеров.' ;;
+        nextdns) title='DNS через NextDNS'; callback=setup_nextdns
+            details='Далее: профиль и DoT / DoH. Применение изменит системный DNS.' ;;
+        crowdsec) title='Защита CrowdSec'; callback=setup_crowdsec
+            details='Далее: установка, состояние или удаление. Установка настраивает службы защиты и firewall bouncer.' ;;
+        antiddos) title='Защита от флуда: vpsguard'; callback=setup_antiddos
+            details='Далее: порты и лимиты. Применение изменит собственную таблицу nftables vpsguard.' ;;
+        antiabuse) title='Защита от злоупотреблений'; callback=setup_antiabuse_center
+            details='Выберите нужную защиту: входящие списки, TCP C2, UDP Spamhaus или анализ подписок. DROP включается отдельно.' ;;
+        remnanode) title='Нода Remnanode'; callback=setup_remnanode
+            details='Далее: способ установки и параметры. Установка может изменить Docker и конфигурацию ноды; для работающей ноды сначала проверьте текущую установку.' ;;
+        swap) title='Файл подкачки'; callback=setup_swap
+            details='Далее: создание, настройка или удаление swap.' ;;
+        kernel) title='Тюнинг сети и ядра'; callback=setup_kernel_tuning
+            details='Далее: sysctl, BBR, RPS и conntrack. XanMod меняет ядро и требует перезагрузки; выбирается отдельно в этом разделе.' ;;
+        *) echo 'Неизвестный компонент'; return 1 ;;
     esac
+    print_header
+    printf 'VPS / %s\n\n%s\n\n' "$title" "$details"
+    echo 'Будет открыт только выбранный компонент. Другие компоненты не запускаются.'
+    echo 'Повторный запуск старых установщиков может изменить существующие настройки.'
+    echo
+    echo '  1) Продолжить к выбранному компоненту'
+    echo '  0) Назад'
+    read -e -r -p 'Выбор: ' answer || return 0
+    case "$answer" in
+        1) "$callback" ;;
+        0) return 0 ;;
+        *) echo 'Переход отменён: выберите 1 или 0.' ;;
+    esac
+}
 
-    echo ""
-    read -e -p "Нажмите Enter для возврата в меню..."
-done
+vps_base_menu() {
+    vps_menu 'VPS / Установка / Базовые компоненты' \
+        'Выберите одну задачу. Настройки SSH, firewall и ядра не применяются пакетом.' \
+        '1|Системные пакеты: обновить|action|vps_install_entry|packages' \
+        '2|SSH: ключ и порт|action|vps_install_entry|ssh' \
+        '3|Firewall UFW: входящие порты|action|vps_install_entry|ufw' \
+        '4|Защита SSH: fail2ban|action|vps_install_entry|fail2ban' \
+        '5|Автообновления ОС|action|vps_install_entry|autoupdates'
+}
+
+vps_install_menu() {
+    vps_menu 'VPS / Установка компонентов' \
+        'Выберите компонент. Сначала покажем, что он изменяет, затем откроем его настройки.' \
+        '1|База: пакеты, SSH, UFW, fail2ban|page|vps_base_menu|' \
+        '2|NextDNS: системный DNS через DoT / DoH|action|vps_install_entry|nextdns' \
+        '3|CrowdSec: защита от атак|action|vps_install_entry|crowdsec' \
+        '4|Anti-DDoS: лимиты входящих соединений|action|vps_install_entry|antiddos' \
+        '5|Anti-Abuse: TCP C2, UDP, Spamhaus, анализ подписок|action|vps_install_entry|antiabuse' \
+        '6|Remnanode: установка VPN-ноды|action|vps_install_entry|remnanode' \
+        '7|Docker: установка и зеркала|action|vps_install_entry|docker' \
+        '8|Swap: файл подкачки|action|vps_install_entry|swap'
+}
+
+vps_security_menu() {
+    vps_menu 'VPS / Защита сервера' \
+        'Каждый раздел содержит собственные настройки и проверку состояния.' \
+        '1|Anti-Abuse: TCP / UDP DROP и анализ подписок|page|setup_antiabuse_center|' \
+        '2|CrowdSec: атаки и блокировки|action|setup_crowdsec|' \
+        '3|Anti-DDoS: лимиты соединений и флуда|action|setup_antiddos|' \
+        '4|AS-списки: блокировка входящих по сетям|action|setup_as_blacklist|' \
+        '5|GeoBlock: доступ по странам|action|setup_geoblock|' \
+        '6|UFW: входящие порты|action|vps_install_entry|ufw' \
+        '7|fail2ban: защита SSH|action|vps_install_entry|fail2ban'
+}
+
+vps_network_menu() {
+    vps_menu 'VPS / Сеть и ресурсы' \
+        'DNS, маршруты и сетевые параметры могут влиять на доступность сервера.' \
+        '1|NextDNS: DNS, профиль, DoT / DoH|action|setup_nextdns|' \
+        '2|IPv6: включить / отключить|action|setup_ipv6|' \
+        '3|Сеть и ядро: BBR, RPS, conntrack, XanMod|action|vps_install_entry|kernel' \
+        '4|WARP: исходящий туннель|action|setup_warp|' \
+        '5|Swap: файл подкачки|action|setup_swap|'
+}
+
+vps_node_menu() {
+    vps_menu 'VPS / VPN-нода и подключения' \
+        'Remnanode, Docker и сетевые инструменты ноды.' \
+        '1|Remnanode: способы установки|action|vps_install_entry|remnanode' \
+        '2|Docker: установка и зеркала|action|vps_install_entry|docker' \
+        '3|Шейпер: ограничения скорости|action|setup_speed_shaper|' \
+        '4|Проверка IP извне: временный probe-сервер|action|setup_probe_server|'
+}
+
+vps_diagnostics_menu() {
+    vps_menu 'VPS / Статус и журналы' \
+        'Просмотр состояния и журналов. Установка и включение блокировок здесь не запускаются.' \
+        '1|Система: SSH, firewall, службы, ресурсы|action|show_system_status|' \
+        '2|Защиты Anti-Abuse: режимы и счётчики|action|antiabuse_center_status|' \
+        '3|Журнал атак: SSH, fail2ban, CrowdSec|action|show_security_log|' \
+        '4|Журнал действий менеджера|action|show_script_log|'
+}
+
+vps_updates_menu() {
+    vps_menu 'VPS / Обновления' \
+        'Обновление с резервной копией и откатом доступно для движка Guard. Общего обновления всех компонентов пока нет.' \
+        '1|Guard: проверить обновление, без изменений|action|guard_engine_menu_action|check' \
+        '2|Guard: обновить движок с резервной копией и откатом|action|guard_engine_menu_action|apply' \
+        '3|Пакеты ОС: обновить через APT (возможен перезапуск служб)|action|vps_install_entry|packages' \
+        '4|Автообновления ОС: настроить|action|vps_install_entry|autoupdates'
+}
+
+vps_advanced_menu() {
+    vps_menu 'VPS / Дополнительно' \
+        'Старые комплексные сценарии предназначены для отдельной подготовки сервера. Проверяйте их состав перед запуском.' \
+        '1|Подготовка РФ-ноды: APT-зеркала и Docker|action|vps_prepare_ru_entry|' \
+        '9|Полная очистка: удаление установленных слоёв|action|cleanup_legacy|'
+}
+
+vps_prepare_ru_entry() {
+    local answer
+    echo 'Изменит APT-зеркала и установку Docker. Проверьте работающие сервисы.'
+    read -e -r -p 'Введите PREPARE-RU для продолжения: ' answer || return 0
+    [[ "$answer" == PREPARE-RU ]] || { echo 'Отменено'; return 0; }
+    prepare_ru_node && prepare_ru_docker
+}
+
+vps_main_menu() {
+    vps_menu 'VPS / Главное меню' \
+        'Новый VPS — пункт 1. Отдельные компоненты — пункт 7. Состояние — пункт 5. Назад / выход — 0.' \
+        '1|Универсальная установка VPS|action|setup_one_button|' \
+        '2|Защита: firewall, Anti-DDoS, Anti-Abuse|page|vps_security_menu|' \
+        '3|Сеть и ресурсы: DNS, IPv6, BBR, Swap|page|vps_network_menu|' \
+        '4|VPN-нода: Remnanode, Docker, шейпер|page|vps_node_menu|' \
+        '5|Проверить сервер: статус и журналы|page|vps_diagnostics_menu|' \
+        '6|Обновления: Guard и пакеты ОС|page|vps_updates_menu|' \
+        '7|Отдельные компоненты: установить / настроить|page|vps_install_menu|' \
+        '9|Дополнительно: подготовка РФ-ноды и очистка|page|vps_advanced_menu|'
+}
+
+# Инициализация лога выполняется только при запуске программы.
+mkdir -p "$(dirname "$LOG_FILE")"
+log '=== Запуск vps-setup.sh ==='
+vps_main_menu
+log '=== Выход из vps-setup.sh ==='
+echo 'Выход.'
