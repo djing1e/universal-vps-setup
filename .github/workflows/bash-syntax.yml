@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'vps-setup.sh'
+      - 'install.sh'
       - 'modules/**'
       - 'lib/**'
       - 'tests/**'
@@ -11,6 +12,7 @@ on:
   pull_request:
     paths:
       - 'vps-setup.sh'
+      - 'install.sh'
       - 'modules/**'
       - 'lib/**'
       - 'tests/**'
@@ -31,6 +33,7 @@ jobs:
         shell: bash
         run: |
           bash -n vps-setup.sh
+          bash -n install.sh
           bash -n modules/xtls-c2-feed.sh
           echo 'Bash syntax OK'
       - name: Auto Abuse Guard syntax and regression tests

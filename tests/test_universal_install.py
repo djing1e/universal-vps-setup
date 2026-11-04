@@ -8,9 +8,10 @@ import unittest
 SOURCE = (Path(__file__).resolve().parents[1] / 'vps-setup.sh').read_text()
 BATCH = SOURCE[SOURCE.index('ONEBTN_RESULTS=()\nonebtn_step()'):SOURCE.index('\n# =====================================================\n# ПОЛНАЯ ВЫЧИСТКА')]
 STEPS = ('do_update_packages', 'do_ssh_setup', 'do_ufw_setup',
-         'kt_apply_sysctl', 'do_autoupgrade', 'do_fail2ban', 'crowdsec_install')
+         'kt_apply_sysctl', 'do_autoupgrade', 'do_fail2ban', 'crowdsec_install',
+         'asb_install_iptables', 'tib_install', 'universal_tcp_drop', 'universal_udp_drop')
 FORBIDDEN = ('do_sysctl_setup', 'kt_install_xanmod', 'setup_nextdns',
-             'ad_install', 'tib_install', 'asb_install_iptables',
+             'ad_install',
              'setup_antiabuse_center', 'setup_remnanode', 'do_docker_mirrors',
              'ensure_loopback_accept', 'reboot')
 
@@ -32,12 +33,12 @@ class UniversalInstallTests(unittest.TestCase):
                                     env=dict(os.environ, CALLS=str(calls), BBR=bbr, QDISC=qdisc))
             return result, calls.read_text().splitlines() if calls.exists() else []
 
-    def test_success_runs_only_the_seven_selected_steps_in_order(self):
+    def test_success_runs_only_the_eleven_selected_steps_in_order(self):
         result, calls = self.run_batch()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(calls, list(STEPS))
-        self.assertIn('7 OK, 0 FAIL, 0 SKIP', result.stdout)
-        self.assertIn('Не входят: DNS, XanMod, Anti-DDoS, Anti-Abuse и AS-списки', result.stdout)
+        self.assertIn('11 OK, 0 FAIL, 0 SKIP', result.stdout)
+        self.assertIn('Не входят: DNS, XanMod, Anti-DDoS и автоматические баны подписок', result.stdout)
 
     def test_decline_invalid_and_eof_do_nothing(self):
         for answer in ('', '0\n', 'y\n', 'YES\n'):
@@ -59,13 +60,13 @@ class UniversalInstallTests(unittest.TestCase):
             result, calls = self.run_batch(fail=step)
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertEqual(calls, list(STEPS))
-            self.assertIn('6 OK, 1 FAIL, 0 SKIP', result.stdout)
+            self.assertIn('10 OK, 1 FAIL, 0 SKIP', result.stdout)
 
     def test_optional_crowdsec_skip_is_visible(self):
         result, calls = self.run_batch(fail='crowdsec_install', code=2)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(calls, list(STEPS))
-        self.assertIn('6 OK, 0 FAIL, 1 SKIP', result.stdout)
+        self.assertIn('10 OK, 0 FAIL, 1 SKIP', result.stdout)
         self.assertIn('с пропущенными шагами', result.stdout)
 
     def test_unavailable_bbr_or_fq_does_not_install_another_kernel(self):

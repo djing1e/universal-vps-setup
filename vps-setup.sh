@@ -9,7 +9,6 @@
 # =====================================
 # КОНФИГУРАЦИЯ — измени под себя
 # =====================================
-SSH_KEY="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDBzUZGuDMpKZXcB6XknFg73Z+74TkKSvX8DN7K0L7oItWIJg5/9D2dVKFak5GRs20dV4KezDkeggvttg2xiFzyfplj9qtBZHRerlLW5JgefGol78S5XvVWLBvUrdP+2mUU7lyaH6sb/xKJvNwvkeMfLUDpJHAtzT09/GiIMSIhXsUWFIKXsxWpsd9wYmUYli+PsZcEZIdxUPNFvn6wX3eoa8xOco9tgzWjqPANzvfzDEhziCYFv6GgbPbyCiuWcsAPhqRI+APHpUnbnnV6DqoM5DBNg94OgGbsCh9kHUHscrWlcoXet+hun8Htx7jEP0MKIB2KlCXwUwpI/l5+0Qvz rsa-key-20250213"
 DEFAULT_SSH_PORT=62152
 
 # Interactive prompts use Bash Readline (-e) so both Backspace encodings
@@ -677,34 +676,69 @@ do_update_packages() {
     log_section "Обновление пакетов"
     prepare_ru_node        # авто-подмена зеркал, если дефолт недоступен (РФ)
     apt update && apt upgrade -y || return 1
-    apt install -y curl wget htop net-tools unattended-upgrades || return 1
+    apt install -y curl ca-certificates wget htop net-tools unattended-upgrades python3 nftables openssh-client || return 1
     log "Пакеты обновлены."
+}
+
+# Obtain a public key before changing SSH or disabling password login.
+# No operator key is bundled, and existing authorized_keys entries are retained.
+vps_ssh_public_key() {
+    local authorized="$1" key candidate
+    [[ ! -L "$authorized" && ! -L "$(dirname "$authorized")" ]] || { echo 'Symlink в SSH-ключах: требуется ручная проверка.' >&2; return 1; }
+    command -v ssh-keygen >/dev/null || { echo 'Требуется openssh-client (ssh-keygen).' >&2; return 1; }
+    echo 'Вставьте публичный SSH-ключ одной строкой (содержимое .pub). Приватный ключ не вводите.'
+    echo 'Enter — сохранить существующие ключи; 0 — отменить настройку SSH.'
+    while true; do
+        read -e -r -p 'Публичный SSH-ключ: ' key || return 1
+        [[ "$key" != 0 ]] || return 1
+        if [[ -z "$key" ]]; then
+            if [[ -s "$authorized" ]] && ssh-keygen -lf "$authorized" >/dev/null 2>&1; then
+                echo 'Существующие публичные ключи сохранены.'
+                return 0
+            fi
+            echo 'Рабочего публичного ключа нет. Вставьте ключ или введите 0.'
+            continue
+        fi
+        case "$key" in
+            ssh-*' '*|ecdsa-*' '*|sk-*' '*) ;;
+            *) echo 'Нужен публичный ключ OpenSSH, например ssh-ed25519 …'; continue ;;
+        esac
+        candidate=$(mktemp /tmp/vps-ssh-key.XXXXXXXX) || return 1
+        chmod 600 "$candidate" || { rm -f "$candidate"; return 1; }
+        printf '%s\n' "$key" > "$candidate"
+        if ! ssh-keygen -lf "$candidate" >/dev/null 2>&1; then
+            rm -f "$candidate"
+            echo 'SSH-ключ не прошёл проверку. Вставьте полную строку из .pub.'
+            continue
+        fi
+        rm -f "$candidate"
+        mkdir -p "$(dirname "$authorized")" || return 1
+        chmod 700 "$(dirname "$authorized")" || return 1
+        touch "$authorized" && chmod 600 "$authorized" || return 1
+        if ! grep -Fxq -- "$key" "$authorized"; then
+            # A prior file may have no trailing newline.
+            [[ ! -s "$authorized" ]] || printf '\n' >> "$authorized" || return 1
+            printf '%s\n' "$key" >> "$authorized" || return 1
+        fi
+        echo 'Публичный SSH-ключ проверен и сохранён.'
+        return 0
+    done
 }
 
 do_ssh_setup() {
     echo ""
     log_section "Настройка SSH"
-
     SSH_DIR="/root/.ssh"
     AUTH_KEYS="$SSH_DIR/authorized_keys"
-    mkdir -p "$SSH_DIR" && chmod 700 "$SSH_DIR"
-    touch "$AUTH_KEYS" && chmod 600 "$AUTH_KEYS"
-
-    if ! grep -q "$SSH_KEY" "$AUTH_KEYS"; then
-        echo "$SSH_KEY" >> "$AUTH_KEYS"
-        echo "SSH ключ добавлен."
-    else
-        echo "SSH ключ уже существует."
-    fi
-
-    echo ""
-    read -e -p "SSH порт [${DEFAULT_SSH_PORT}]: " SSH_PORT
+    echo
+    read -e -r -p "SSH порт [${DEFAULT_SSH_PORT}]: " SSH_PORT || return 1
     SSH_PORT=${SSH_PORT:-$DEFAULT_SSH_PORT}
     if [[ ! "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] ||
        (( 10#$SSH_PORT < 1 || 10#$SSH_PORT > 65535 )); then
         log "ОШИБКА: недопустимый SSH порт: $SSH_PORT"
         return 1
     fi
+    vps_ssh_public_key "$AUTH_KEYS" || { echo 'SSH не изменён: ключ не подтверждён.'; return 1; }
 
     SSHD_CONFIG="/etc/ssh/sshd_config"
     local ssh_backup="${SSHD_CONFIG}.bak.$(date +%Y%m%d%H%M%S)"
@@ -8648,6 +8682,80 @@ setup_threat_blocklist() {
 # Критические ошибки останавливают установку; все выполненные шаги видны в отчёте.
 
 # ── раннер шага: логирует, ловит код возврата, не роняет скрипт ──
+# Initial setup explicitly opts into permanent outgoing DROP. Manual menus keep
+# their independent confirmations and temporary safety timers.
+universal_tcp_drop() (
+    set -euo pipefail
+    umask 077
+    local work target=/usr/local/sbin/xtls-c2-feed
+    work=$(mktemp -d /tmp/vps-universal-c2.XXXXXXXX) || return 1
+    trap 'rm -rf "$work"' EXIT
+    xtls_c2_write_embedded_module > "$work/module.sh" || return 1
+    bash -n "$work/module.sh" || return 1
+    python3 - "$work/module.sh" <<'PY_C2_PREFLIGHT' || return 1
+import hashlib,re,stat,sys
+from pathlib import Path
+source=Path(sys.argv[1]).read_bytes()
+target=Path('/usr/local/sbin/xtls-c2-feed')
+def regular(path):
+    info=path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_uid!=0 or info.st_gid!=0 or info.st_mode & 0o022:
+        raise ValueError(f'нестандартный файл: {path}')
+try:
+    for directory in ('/usr/local/sbin','/etc/systemd/system','/etc/xtls-c2-feed'):
+        if Path(directory).is_symlink(): raise ValueError(f'symlink: {directory}')
+    if target.exists() or target.is_symlink():
+        regular(target)
+        if target.read_bytes()!=source: raise ValueError('неизвестная версия TCP C2; автоматическая замена отменена')
+    units=re.findall(r"cat >(/etc/systemd/system/xtls-c2-feed-[^ ]+) <<'UNIT'\n(.*?)\nUNIT",source.decode(),re.S)
+    if len(units)!=3: raise ValueError('не удалось проверить C2 unit templates')
+    for name,body in units:
+        path=Path(name)
+        if path.exists() or path.is_symlink():
+            regular(path)
+            if path.read_bytes()!=(body+'\n').encode(): raise ValueError(f'локальные изменения unit: {path}')
+        override=Path(str(path)+'.d')
+        if override.is_symlink() or (override.exists() and any(override.iterdir())):
+            raise ValueError(f'локальные переопределения: {override}')
+    config=Path('/etc/xtls-c2-feed')
+    if config.exists() and any(path.is_symlink() for path in config.iterdir()):
+        raise ValueError('symlink в конфигурации C2')
+except (OSError,ValueError) as error:
+    print('Установка TCP C2 отменена: '+str(error),file=sys.stderr)
+    sys.exit(1)
+PY_C2_PREFLIGHT
+    if [[ ! -e "$target" ]] && nft list table ip xtls_c2_feed >/dev/null 2>&1; then
+        echo 'Таблица C2 есть, но её модуль неизвестен. Нужна ручная проверка.'
+        return 1
+    fi
+    bash "$work/module.sh" install || return 1
+    # The batch preview and yes explicitly authorize this activation.
+    printf 'ENABLE-C2-BLOCK\n' | bash "$work/module.sh" enable-block || return 1
+    [[ "$(cat /etc/xtls-c2-feed/mode)" == block ]] || return 1
+    nft list chain ip xtls_c2_feed output | grep -q 'comment "xtls-c2-block"' || return 1
+    if systemctl is-active --quiet xtls-c2-drop-safety.timer; then
+        systemctl stop xtls-c2-drop-safety.timer || return 1
+    fi
+    bash "$work/module.sh" status || return 1
+)
+
+universal_udp_drop() {
+    spamhaus_udp_install || return 1
+    spamhaus_udp_require_installed || return 1
+    if [[ ! -f /etc/xtls-spamhaus-udp/exemptions.txt ]]; then
+        spamhaus_udp_exemptions || return 1
+    fi
+    [[ -f /etc/xtls-spamhaus-udp/exemptions.txt ]] || {
+        echo 'UDP DROP не включён: исключения не подтверждены.'; return 1;
+    }
+    /usr/bin/python3 /usr/local/sbin/xtls-spamhaus-udp enable-block || return 1
+    [[ "$(cat /etc/xtls-spamhaus-udp/mode)" == block ]] || return 1
+    if systemctl is-active --quiet xtls-sh-udp-safety.timer; then
+        systemctl stop xtls-sh-udp-safety.timer || return 1
+    fi
+    /usr/bin/python3 /usr/local/sbin/xtls-spamhaus-udp status
+}
+
 ONEBTN_RESULTS=()
 onebtn_step() {
     local name="$1"; shift
@@ -8703,8 +8811,14 @@ setup_one_button() {
     echo '  5. Настроить автообновления ОС'
     echo '  6. Установить fail2ban для SSH'
     echo '  7. Установить CrowdSec и Firewall Bouncer'
+    echo '  8. AS-списки: блокировка входящих источников'
+    echo '  9. Spamhaus + FireHOL: блокировка входящих источников'
+    echo ' 10. TCP OUTPUT DROP: C2 IP:порт (IPv4)'
+    echo ' 11. UDP OUTPUT DROP: сети Spamhaus (IPv4/IPv6)'
     echo
-    echo 'Не входят: DNS, XanMod, Anti-DDoS, Anti-Abuse и AS-списки.'
+    echo 'TCP/UDP DROP включается и сохраняется постоянно в рамках этой установки.'
+    echo 'UDP-исключения (панель / entry) будут запрошены; NONE — явно без исключений.'
+    echo 'Не входят: DNS, XanMod, Anti-DDoS и автоматические баны подписок.'
     echo 'Docker и Remnanode устанавливаются отдельно.'
     echo
     rn_warn 'Для начальной настройки VPS. Это не безопасное обновление работающей ноды.'
@@ -8736,6 +8850,10 @@ setup_one_button() {
         onebtn_step 'Автообновления ОС' do_autoupgrade
         onebtn_step 'fail2ban: защита SSH' do_fail2ban
         onebtn_step 'CrowdSec + Firewall Bouncer' crowdsec_install
+        onebtn_step 'AS-списки: INPUT DROP' asb_install_iptables
+        onebtn_step 'Spamhaus + FireHOL: INPUT DROP' tib_install
+        onebtn_step 'TCP C2: OUTPUT DROP' universal_tcp_drop
+        onebtn_step 'UDP Spamhaus: OUTPUT DROP' universal_udp_drop
     else
         critical_failed=1
         rn_error 'Установка остановлена: пакеты, SSH или UFW не настроены успешно.'
@@ -10479,8 +10597,21 @@ vps_main_menu() {
 }
 
 # Инициализация лога выполняется только при запуске программы.
+case "${1:-}" in
+    ''|--install) ;;
+    --help|-h) echo 'Usage: vps-setup [--install]'; exit 0 ;;
+    *) echo 'Неизвестный аргумент. Usage: vps-setup [--install]' >&2; exit 2 ;;
+esac
+(( $# <= 1 )) || { echo 'Лишние аргументы.' >&2; exit 2; }
+(( EUID == 0 )) || { echo 'Запускайте от root: sudo -i' >&2; exit 1; }
 mkdir -p "$(dirname "$LOG_FILE")"
 log '=== Запуск vps-setup.sh ==='
-vps_main_menu
+result=0
+if [[ "${1:-}" == --install ]]; then
+    setup_one_button || result=$?
+else
+    vps_main_menu || result=$?
+fi
 log '=== Выход из vps-setup.sh ==='
 echo 'Выход.'
+exit "$result"
