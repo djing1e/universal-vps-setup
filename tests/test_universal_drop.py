@@ -28,6 +28,20 @@ class UniversalC2Tests(unittest.TestCase):
         systemctl = self.f.bin / 'systemctl'
         text = systemctl.read_text().replace("assert a ==", "if a[:1] == ['is-active']: sys.exit(3)\nassert a ==", 1)
         systemctl.write_text(text)
+        nft = self.f.bin / 'nft'
+        data = nft.read_text()
+        marker = "elif a in (['list', 'chain', 'ip', 'xtls_c2_feed', 'output'],"
+        data = data.replace(marker, """elif a == ['-j', 'list', 'chain', 'ip', 'xtls_c2_feed', 'output']:
+    if (p/'json-error').exists(): sys.exit(1)
+    if (p/'json-broken').exists(): print('{broken'); sys.exit(0)
+    rows=[]
+    for h, comment in s['rules']:
+        expr=[{'drop':None}] if comment=='xtls-c2-block' and not (p/'marker-only').exists() else [{'counter':{'packets':0,'bytes':0}}]
+        rows.append({'rule':{'family':'ip','table':'xtls_c2_feed','chain':'output','handle':h,'comment':comment,'expr':expr}})
+    print(json.dumps({'nftables':rows}))
+""" + marker)
+        data = data.replace("        print(f'  {expr} comment \"{comment}\" {handle}')", "        quote='' if (p/'unquoted').exists() else chr(34)\n        print(f'  {expr} comment {quote}{comment}{quote} {handle}')")
+        nft.write_text(data)
 
     def run_install(self):
         return subprocess.run(['bash', '-c', self.helper + '\nuniversal_tcp_drop'],
@@ -41,6 +55,23 @@ class UniversalC2Tests(unittest.TestCase):
             self.assertEqual([r[1] for r in self.f.state()['rules']], ['xtls-c2-block'])
             self.assertIn('1.1.1.1 . 8443', self.f.state()['elements'][0])
         self.assertTrue((self.f.root / 'etc/systemd/system/xtls-c2-feed-update.timer').exists())
+
+    def test_human_comment_quoting_does_not_turn_successful_drop_into_failure(self):
+        (self.f.root / 'unquoted').touch()
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Live mode: block', result.stdout)
+        self.assertEqual([r[1] for r in self.f.state()['rules']], ['xtls-c2-block'])
+
+    def test_unreadable_invalid_json_and_marker_without_drop_do_not_report_success(self):
+        for marker in ('json-error', 'json-broken', 'marker-only'):
+            path = self.f.root / marker
+            path.touch()
+            result = self.run_install()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('Проверка TCP C2', result.stdout + result.stderr)
+            self.assertNotIn('Verified C2 DROP rules: 1', result.stdout)
+            path.unlink()
 
     def test_failed_feed_never_enables_drop_or_claims_success(self):
         for raw in (None, '8.8.8.8,not-a-port\n'):

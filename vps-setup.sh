@@ -8731,12 +8731,34 @@ PY_C2_PREFLIGHT
     bash "$work/module.sh" install || return 1
     # The batch preview and yes explicitly authorize this activation.
     printf 'ENABLE-C2-BLOCK\n' | bash "$work/module.sh" enable-block || return 1
-    [[ "$(cat /etc/xtls-c2-feed/mode)" == block ]] || return 1
-    nft list chain ip xtls_c2_feed output | grep -q 'comment "xtls-c2-block"' || return 1
+    [[ "$(cat /etc/xtls-c2-feed/mode)" == block ]] || {
+        echo 'Проверка TCP C2: режим block не сохранён.' >&2; return 1;
+    }
+    # Read a complete structured snapshot: human formatting and grep's early
+    # pipe close must not turn an installed DROP into an unexplained FAIL.
+    nft -j list chain ip xtls_c2_feed output > "$work/live.json" || {
+        echo 'Проверка TCP C2: не удалось прочитать текущую цепочку; проверьте nftables.' >&2; return 1;
+    }
+    python3 - "$work/live.json" <<'PY_C2_VERIFY' || return 1
+import json,sys
+from pathlib import Path
+try:
+    data=json.loads(Path(sys.argv[1]).read_text())
+    rules=[item['rule'] for item in data['nftables'] if 'rule' in item]
+    owned=[rule for rule in rules if rule.get('comment')=='xtls-c2-block']
+    if len(owned)!=1 or not any('drop' in expr for expr in owned[0].get('expr',[])):
+        raise ValueError('ожидалось одно правило xtls-c2-block с вердиктом DROP')
+except (OSError,ValueError,KeyError,TypeError) as error:
+    print('Проверка TCP C2: '+str(error),file=sys.stderr)
+    sys.exit(1)
+print('Saved mode: block')
+print('Live mode: block')
+print('Verified C2 DROP rules: 1')
+PY_C2_VERIFY
     if systemctl is-active --quiet xtls-c2-drop-safety.timer; then
         systemctl stop xtls-c2-drop-safety.timer || return 1
     fi
-    bash "$work/module.sh" status || return 1
+    return 0
 )
 
 universal_udp_drop() {
