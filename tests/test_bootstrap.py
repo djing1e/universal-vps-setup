@@ -66,7 +66,7 @@ if [[ -n "${CORRUPT_DOWNLOAD:-}" ]]; then echo corrupt > "${@: -1}"; else cp "$P
         self.assertIn('LAUNCHED:--install', r.stdout)
         self.assertIn('ANSWER:interactive-key', r.stdout)
         calls = self.calls.read_text().splitlines()
-        self.assertEqual(calls[:2], ['apt-get:update', 'apt-get:install -y --no-remove curl ca-certificates'])
+        self.assertEqual(calls[:2], ['apt-get:update', 'apt-get:-o DPkg::Lock::Timeout=600 install -y --no-remove curl ca-certificates'])
 
     def test_download_checksum_syntax_or_apt_failure_does_not_replace_old_manager(self):
         self.target.write_text('old version\n')

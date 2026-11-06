@@ -4,8 +4,8 @@ set -euo pipefail
 umask 077
 
 # Pin the payload independently of the mutable bootstrap URL.
-SOURCE_REVISION=c032fbb22f3626b404f84d5fa0fd7f696e73a5f7
-SCRIPT_SHA256=9e8b90d5746f97b7d8c1f746b1e8fd13ade8488f9ccd386581fc9d8b15133552
+SOURCE_REVISION=826df807182cf6312f097220e3bdc8b1c4e9baf5
+SCRIPT_SHA256=5786f7326fa216e0ce9b6c4bb9823ecc06dfb0d20a0d3b75f20b0005e9dbbdd0
 SOURCE_URL="https://raw.githubusercontent.com/djing1e/universal-vps-setup/${SOURCE_REVISION}/vps-setup.sh"
 TARGET=/usr/local/sbin/vps-setup
 LAUNCHER=/usr/local/bin/vps-setup
@@ -20,7 +20,7 @@ esac
 if ! command -v curl >/dev/null || [[ ! -s /etc/ssl/certs/ca-certificates.crt ]]; then
     command -v apt-get >/dev/null || { echo 'Требуется Debian / Ubuntu с APT.' >&2; exit 1; }
     apt-get update
-    apt-get install -y --no-remove curl ca-certificates
+    apt-get -o DPkg::Lock::Timeout=600 install -y --no-remove curl ca-certificates
 fi
 
 [[ ! -L "$TARGET" ]] || { echo "Symlink: $TARGET; требуется ручная проверка." >&2; exit 1; }
