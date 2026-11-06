@@ -18,7 +18,7 @@ class InstallerTests(unittest.TestCase):
             (self.root / name).mkdir()
         self.calls = self.root / 'calls'
         self.payload = self.root / 'payload'
-        self.payload.write_text('#!/bin/bash\necho "LAUNCHED:$*"\nread -r answer\necho "ANSWER:$answer"\n')
+        self.payload.write_text('#!/bin/bash\necho "LAUNCHED:$*"\necho "MASK:$(umask)"\nread -r answer\necho "ANSWER:$answer"\n')
         self.digest = hashlib.sha256(self.payload.read_bytes()).hexdigest()
         self.source = (ROOT / 'install.sh').read_text()
         # Match either a published pin or placeholders during source preparation.
@@ -65,6 +65,7 @@ if [[ -n "${CORRUPT_DOWNLOAD:-}" ]]; then echo corrupt > "${@: -1}"; else cp "$P
         self.assertEqual(self.launcher.resolve(), self.target)
         self.assertIn('LAUNCHED:--install', r.stdout)
         self.assertIn('ANSWER:interactive-key', r.stdout)
+        self.assertIn('MASK:0022', r.stdout)
         calls = self.calls.read_text().splitlines()
         self.assertEqual(calls[:2], ['apt-get:update', 'apt-get:-o DPkg::Lock::Timeout=600 install -y --no-remove curl ca-certificates'])
 

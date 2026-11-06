@@ -4,8 +4,8 @@ set -euo pipefail
 umask 077
 
 # Pin the payload independently of the mutable bootstrap URL.
-SOURCE_REVISION=826df807182cf6312f097220e3bdc8b1c4e9baf5
-SCRIPT_SHA256=5786f7326fa216e0ce9b6c4bb9823ecc06dfb0d20a0d3b75f20b0005e9dbbdd0
+SOURCE_REVISION=98e73f5748aa78bc71166d677dac6c1a52d9b604
+SCRIPT_SHA256=55cbf5196d59e07170fac85a4197b83199d472f0574e3d0de00f2564054ded2f
 SOURCE_URL="https://raw.githubusercontent.com/djing1e/universal-vps-setup/${SOURCE_REVISION}/vps-setup.sh"
 TARGET=/usr/local/sbin/vps-setup
 LAUNCHER=/usr/local/bin/vps-setup
@@ -50,7 +50,7 @@ stage=''
 if [[ ! -L "$LAUNCHER" ]]; then ln -s "$TARGET" "$LAUNCHER"; fi
 printf 'Установлено: %s\nПовторный запуск меню: vps-setup\n' "$TARGET"
 if [[ "$action" == --install ]]; then
-    "$TARGET" --install
+    (umask 022; "$TARGET" --install)
 else
-    "$TARGET"
+    (umask 022; "$TARGET")
 fi
