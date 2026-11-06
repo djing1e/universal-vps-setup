@@ -1911,13 +1911,14 @@ _nextdns_bookworm_binary() {
 
 _nextdns_doh_prepare() {
     local profile="$1" stamp ip i successes selected=() candidates dnscrypt_bin=/usr/sbin/dnscrypt-proxy
+    local doh_user=_dnscrypt-proxy doh_group candidate
     if (. /etc/os-release; [ "$ID" = debian ] && [ "$VERSION_ID" = 12 ]); then
-        if ! apt-get install -y --no-remove python3 dnsutils curl ca-certificates ||
+        if ! apt-get -o DPkg::Lock::Timeout=600 install -y --no-remove python3 dnsutils curl ca-certificates ||
            ! _nextdns_bookworm_binary; then
             echo 'Ошибка установки DoH-зависимостей Debian 12'; return 1
         fi
         dnscrypt_bin=/usr/local/libexec/nextdns-doh/dnscrypt-proxy
-    elif ! apt-get install -y --no-remove dnscrypt-proxy python3 dnsutils curl; then
+    elif ! apt-get -o DPkg::Lock::Timeout=600 install -y --no-remove dnscrypt-proxy python3 dnsutils curl; then
         echo 'Ошибка установки DoH-зависимостей'; return 1
     fi
     # Try NextDNS documented anycast IPs first, then previously verified
@@ -1967,7 +1968,13 @@ _nextdns_doh_prepare() {
         echo "ПРЕДУПРЕЖДЕНИЕ: только один доступный DoH endpoint (${selected[0]})" >&2
     fi
 
-    install -d -m 0755 /etc/nextdns-doh || return 1
+    [[ ! -L /etc/nextdns-doh && ! -L /etc/nextdns-doh/dnscrypt-proxy.toml ]] || {
+        echo 'ОШИБКА: symlink в конфигурации DoH; требуется ручная проверка.' >&2; return 1;
+    }
+    doh_group=$(id -gn "$doh_user") || { echo 'Пользователь DoH не найден.' >&2; return 1; }
+    command -v runuser >/dev/null || { echo 'Требуется runuser для проверки от пользователя DoH.' >&2; return 1; }
+    install -d -o root -g "$doh_group" -m 0750 /etc/nextdns-doh || return 1
+    candidate=$(mktemp /etc/nextdns-doh/.dnscrypt-proxy.XXXXXXXX) || return 1
     {
         printf '%s\n' "listen_addresses = ['127.0.0.1:5353']"
         printf '%s\n' 'max_clients = 1000' 'cache = true' 'cache_size = 4096'
@@ -1990,23 +1997,30 @@ netprobe_timeout = 0
 [static]
 EOF_DOH
         for i in "${!selected[@]}"; do
-            stamp="$(_nextdns_doh_stamp "$profile" "${selected[$i]}")" || return 1
+            stamp="$(_nextdns_doh_stamp "$profile" "${selected[$i]}")" || { rm -f "$candidate"; return 1; }
             printf "  [static.'nextdns-%s']\n  stamp = '%s'\n" "$i" "$stamp"
         done
-    } > /etc/nextdns-doh/dnscrypt-proxy.toml || return 1
-    # Validate generated configuration before restarting the DNS service.
-    if ! "$dnscrypt_bin" -check -config /etc/nextdns-doh/dnscrypt-proxy.toml; then
-        echo 'ОШИБКА: проверка dnscrypt-proxy -check не пройдена' >&2
+    } > "$candidate" || { rm -f "$candidate"; return 1; }
+    # Root writes the config, but the service must be able to traverse/read it
+    # even when installation inherited umask 077. Keep it read-only to the user.
+    if ! chown "root:$doh_group" "$candidate" || ! chmod 0640 "$candidate"; then
+        rm -f "$candidate"; return 1
+    fi
+    if ! runuser -u "$doh_user" -- "$dnscrypt_bin" -check -config "$candidate"; then
+        echo 'ОШИБКА: проверка конфигурации от пользователя DoH не пройдена' >&2
+        rm -f "$candidate"
         return 1
     fi
-    cat > /etc/systemd/system/nextdns-doh.service <<EOF_UNIT
+    mv -f "$candidate" /etc/nextdns-doh/dnscrypt-proxy.toml || { rm -f "$candidate"; return 1; }
+    cat > /etc/systemd/system/nextdns-doh.service <<EOF_UNIT || return 1
 [Unit]
 Description=NextDNS DoH via dnscrypt-proxy
 After=network-online.target
 Wants=network-online.target
 [Service]
 Type=simple
-User=_dnscrypt-proxy
+User=$doh_user
+Group=$doh_group
 ExecStart=$dnscrypt_bin -config /etc/nextdns-doh/dnscrypt-proxy.toml
 Restart=on-failure
 RestartSec=3
@@ -2017,6 +2031,7 @@ PrivateTmp=yes
 [Install]
 WantedBy=multi-user.target
 EOF_UNIT
+    chmod 0644 /etc/systemd/system/nextdns-doh.service || return 1
     systemctl daemon-reload || return 1
     systemctl disable --now dnscrypt-proxy.socket dnscrypt-proxy.service \
         dnscrypt-proxy-resolvconf.service >/dev/null 2>&1 || true
@@ -2384,7 +2399,7 @@ _nextdns_apply() {
         fi
         if [ "$resolved_removals" = "openresolv" ]; then
             echo 'NextDNS: разрешена замена только openresolv на systemd-resolved.'
-            if ! DEBIAN_FRONTEND=noninteractive apt-get install -y systemd-resolved ||
+            if ! DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y systemd-resolved ||
                ! _nextdns_resolv_restore_snapshot "$net_snapshot"; then
                 echo 'Не удалось установить resolved или восстановить исходный DNS'
                 _nextdns_resolv_restore_snapshot "$net_snapshot" || true
@@ -2392,7 +2407,7 @@ _nextdns_apply() {
                 echo "Снимок оставлен: $net_snapshot"
                 return 1
             fi
-        elif ! apt-get install -y --no-remove systemd-resolved ||
+        elif ! apt-get -o DPkg::Lock::Timeout=600 install -y --no-remove systemd-resolved ||
              ! _nextdns_resolv_restore_snapshot "$net_snapshot"; then
             echo 'Не удалось установить resolved или восстановить исходный DNS'
             _nextdns_resolv_restore_snapshot "$net_snapshot" || true
