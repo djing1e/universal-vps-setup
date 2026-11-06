@@ -2006,7 +2006,7 @@ EOF_DOH
     if ! chown "root:$doh_group" "$candidate" || ! chmod 0640 "$candidate"; then
         rm -f "$candidate"; return 1
     fi
-    if ! runuser -u "$doh_user" -- "$dnscrypt_bin" -check -config "$candidate"; then
+    if ! (cd / && runuser -u "$doh_user" -- "$dnscrypt_bin" -check -config "$candidate"); then
         echo 'ОШИБКА: проверка конфигурации от пользователя DoH не пройдена' >&2
         rm -f "$candidate"
         return 1
@@ -2021,6 +2021,7 @@ Wants=network-online.target
 Type=simple
 User=$doh_user
 Group=$doh_group
+WorkingDirectory=/
 ExecStart=$dnscrypt_bin -config /etc/nextdns-doh/dnscrypt-proxy.toml
 Restart=on-failure
 RestartSec=3
