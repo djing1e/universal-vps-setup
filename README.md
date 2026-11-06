@@ -9,12 +9,14 @@
 Репозиторий публичный: токен не требуется. Команда выполняется от `root`, при необходимости устанавливает `curl` и CA-сертификаты, устанавливает менеджер и сразу открывает универсальную установку:
 
 ```bash
-clear; bash -c 'set -e; if ! command -v curl >/dev/null || [ ! -s /etc/ssl/certs/ca-certificates.crt ]; then apt-get update; apt-get install -y --no-remove curl ca-certificates; fi; installer=$(mktemp /tmp/vps-bootstrap.XXXXXXXX); trap "rm -f -- $installer" EXIT; curl -fsSL --connect-timeout 10 --max-time 120 https://raw.githubusercontent.com/djing1e/universal-vps-setup/main/install.sh -o "$installer"; bash "$installer" --install'
+clear; bash -c 'set -e; if ! command -v curl >/dev/null || [ ! -s /etc/ssl/certs/ca-certificates.crt ]; then apt-get update; apt-get -o DPkg::Lock::Timeout=600 install -y --no-remove curl ca-certificates; fi; installer=$(mktemp /tmp/vps-bootstrap.XXXXXXXX); trap "rm -f -- $installer" EXIT; curl -fsSL --connect-timeout 10 --max-time 120 https://raw.githubusercontent.com/djing1e/universal-vps-setup/main/install.sh -o "$installer"; bash "$installer" --install'
 ```
 
 Это одна команда запуска, а параметры вводятся в терминале: подтверждение состава, SSH-порт, публичный ключ, дополнительные порты UFW, режим fail2ban и UDP-исключения. Вставляйте публичный ключ из `.pub`; приватный ключ не нужен. Enter сохраняет уже установленные валидные ключи. На новой VPS пустой ключ не позволяет продолжить настройку SSH.
 
-`install.sh` загружает `vps-setup.sh` с закреплённого commit, сверяет SHA256 и синтаксис, затем устанавливает `/usr/local/sbin/vps-setup` и команду `/usr/local/bin/vps-setup`. Предыдущий менеджер сохраняется в `/root/vps-setup-backup.*`. Неизвестный файл на месте команды и symlink на месте исполняемого файла требуют ручной проверки. Невозможность установить `curl`, ошибка загрузки, checksum или синтаксиса останавливает запуск.
+`install.sh` загружает `vps-setup.sh` с закреплённого commit, сверяет SHA256 и синтаксис, затем устанавливает `/usr/local/sbin/vps-setup` и команду `/usr/local/bin/vps-setup`. Предыдущий менеджер сохраняется в `/root/vps-setup-backup.*`. Неизвестный файл на месте команды и symlink на месте исполняемого файла требуют ручной проверки. Установка пакетов в универсальном сценарии, CrowdSec и входящих блоклистах ожидает освобождения dpkg до 600 секунд. При таймауте или ошибке зависимости соответствующий шаг останавливается. Файлы блокировок не удаляются, процессы автообновления не завершаются принудительно.
+
+Невозможность установить `curl`, ошибка загрузки, checksum или синтаксиса останавливает запуск.
 
 Для повторного открытия меню:
 
