@@ -675,8 +675,8 @@ do_update_packages() {
     echo ""
     log_section "Обновление пакетов"
     prepare_ru_node        # авто-подмена зеркал, если дефолт недоступен (РФ)
-    apt update && apt upgrade -y || return 1
-    apt install -y curl ca-certificates wget htop net-tools unattended-upgrades python3 nftables openssh-client || return 1
+    apt update && apt -o DPkg::Lock::Timeout=600 upgrade -y || return 1
+    apt-get -o DPkg::Lock::Timeout=600 install -y curl ca-certificates wget htop net-tools unattended-upgrades python3 nftables openssh-client || return 1
     log "Пакеты обновлены."
 }
 
@@ -782,7 +782,7 @@ do_ufw_setup() {
     log_section "Настройка UFW"
 
     # Устанавливаем ufw без удаления iptables-persistent
-    apt install -y ufw --no-remove || return 1
+    apt-get -o DPkg::Lock::Timeout=600 install -y ufw --no-remove || return 1
 
     echo ""
     read -e -p "SSH порт для UFW [${DEFAULT_SSH_PORT}]: " UFW_SSH_PORT
@@ -867,7 +867,7 @@ EOF
 do_fail2ban() {
     echo ""
     log_section "Настройка fail2ban"
-    apt install -y fail2ban
+    apt-get -o DPkg::Lock::Timeout=600 install -y --no-remove fail2ban || return 1
 
     echo ""
     read -e -p "SSH порт для fail2ban [${DEFAULT_SSH_PORT}]: " F2B_PORT
@@ -1264,7 +1264,7 @@ crowdsec_install_impl() {
 
         echo "Подключение официального APT-репозитория CrowdSec..."
 
-        if ! apt-get install -y --no-remove ca-certificates curl gnupg; then
+        if ! apt-get -o DPkg::Lock::Timeout=600 install -y --no-remove ca-certificates curl gnupg; then
             echo "ОШИБКА: не удалось установить зависимости репозитория."
             return 1
         fi
@@ -1337,12 +1337,12 @@ crowdsec_install_impl() {
     # CrowdSec работает совместно с существующим firewall.
     # Не устанавливаем iptables-persistent и не изменяем UFW.
     # Пакеты устанавливаются без разрешения удалять существующие.
-    if ! apt-get install -y --no-remove curl; then
+    if ! apt-get -o DPkg::Lock::Timeout=600 install -y --no-remove curl; then
         echo "ОШИБКА: не удалось установить curl без удаления пакетов."
         return 1
     fi
 
-    if ! apt-get install -y --no-remove crowdsec; then
+    if ! apt-get -o DPkg::Lock::Timeout=600 install -y --no-remove crowdsec; then
         echo "ОШИБКА: установка CrowdSec требует удаления других пакетов или завершилась ошибкой."
         return 1
     fi
@@ -1562,7 +1562,7 @@ EOF
 
     # LAPI уже настроен, CrowdSec запущен.
     # postinst пакета самостоятельно создаёт регистрацию и API-ключ.
-    if ! apt-get install -y --no-remove "$cs_bouncer_pkg" ipset; then
+    if ! apt-get -o DPkg::Lock::Timeout=600 install -y --no-remove "$cs_bouncer_pkg" ipset; then
         echo "ОШИБКА: установка Firewall Bouncer завершилась неудачно."
         return 1
     fi
@@ -6497,7 +6497,12 @@ asb_install_iptables() {
 
     # Зависимости
     for pkg in ipset iptables; do
-        command -v $pkg &>/dev/null || apt-get install -y -qq $pkg
+        if ! command -v "$pkg" >/dev/null; then
+            apt-get -o DPkg::Lock::Timeout=600 install -y -qq --no-remove "$pkg" || {
+                rn_error "AS-списки: не удалось установить $pkg; правила не применяются."; return 1;
+            }
+        fi
+        command -v "$pkg" >/dev/null || { rn_error "AS-списки: команда $pkg отсутствует после установки."; return 1; }
     done
 
     mkdir -p "$ASB_DIR"
@@ -8456,16 +8461,26 @@ tib_build_lists() {
 # Загрузка cidr-файла в ipset атомарно через swap (без дыры в защите).
 # tib_load_set <set_name> <family inet|inet6> <cidr_file>
 tib_load_set() {
-    local set="$1" fam="$2" file="$3" tmp="${1}-tmp"
-    ipset create "$set" hash:net family "$fam" maxelem 262144 -exist 2>/dev/null || true
+    local set="$1" fam="$2" file="$3" tmp="${1}-tmp" c
+    [[ -s "$file" ]] || { rn_error "Threat-Intel: пустой список $file"; return 1; }
+    ipset create "$set" hash:net family "$fam" maxelem 262144 -exist || return 1
     ipset destroy "$tmp" 2>/dev/null || true
-    ipset create "$tmp" hash:net family "$fam" maxelem 262144 2>/dev/null || true
-    local c
-    while IFS= read -r c; do
-        [ -n "$c" ] && ipset add "$tmp" "$c" -exist 2>/dev/null || true
+    ipset create "$tmp" hash:net family "$fam" maxelem 262144 || return 1
+    while IFS= read -r c || [[ -n "$c" ]]; do
+        [[ -n "$c" ]] || continue
+        if ! ipset add "$tmp" "$c" -exist; then
+            ipset destroy "$tmp" 2>/dev/null || true
+            rn_error "Threat-Intel: загрузка $set прервана; прежний набор сохранён."
+            return 1
+        fi
     done < "$file"
-    ipset swap "$tmp" "$set" 2>/dev/null || true
+    if ! ipset swap "$tmp" "$set"; then
+        ipset destroy "$tmp" 2>/dev/null || true
+        rn_error "Threat-Intel: swap $set не выполнен; прежний набор сохранён."
+        return 1
+    fi
     ipset destroy "$tmp" 2>/dev/null || true
+    return 0
 }
 
 tib_install() {
@@ -8476,9 +8491,14 @@ tib_install() {
     tib_print_env "$cs_mode"
 
     for pkg in ipset iptables curl; do
-        command -v "$pkg" &>/dev/null || apt-get install -y -qq "$pkg"
+        if ! command -v "$pkg" >/dev/null; then
+            apt-get -o DPkg::Lock::Timeout=600 install -y -qq --no-remove "$pkg" || {
+                rn_error "Threat-Intel: не удалось установить $pkg; правила не применяются."; return 1;
+            }
+        fi
+        command -v "$pkg" >/dev/null || { rn_error "Threat-Intel: команда $pkg отсутствует после установки."; return 1; }
     done
-    command -v jq &>/dev/null || apt-get install -y -qq jq 2>/dev/null || true
+    command -v jq &>/dev/null || apt-get -o DPkg::Lock::Timeout=600 install -y -qq --no-remove jq 2>/dev/null || true
 
     ensure_loopback_accept   # гарантируем loopback ACCEPT (иначе INPUT DROP ломает DNS)
     mkdir -p "$TIB_DIR"
@@ -8491,21 +8511,21 @@ tib_install() {
     mv -f "$TIB_DIR/threat-v4.cidr.new" "$TIB_DIR/threat-v4.cidr"
     mv -f "$TIB_DIR/threat-v6.cidr.new" "$TIB_DIR/threat-v6.cidr"
 
-    tib_load_set threat-block-v4 inet  "$TIB_DIR/threat-v4.cidr"
-    tib_load_set threat-block-v6 inet6 "$TIB_DIR/threat-v6.cidr"
+    tib_load_set threat-block-v4 inet  "$TIB_DIR/threat-v4.cidr" || return 1
+    tib_load_set threat-block-v6 inet6 "$TIB_DIR/threat-v6.cidr" || return 1
     echo "  ✓ ipset sets загружены (threat-block-v4 / threat-block-v6)"
 
     # Встраивание: при Traffic-Guard — в SCANNERS-BLOCK, иначе в INPUT (как AS_blacklist)
     if tib_detect_trafficguard; then
         iptables -C SCANNERS-BLOCK -m set --match-set threat-block-v4 src -j DROP 2>/dev/null \
-            || iptables -I SCANNERS-BLOCK 1 -m set --match-set threat-block-v4 src -j DROP
+            || iptables -I SCANNERS-BLOCK 1 -m set --match-set threat-block-v4 src -j DROP || return 1
         ip6tables -C SCANNERS-BLOCK -m set --match-set threat-block-v6 src -j DROP 2>/dev/null \
             || ip6tables -I SCANNERS-BLOCK 1 -m set --match-set threat-block-v6 src -j DROP 2>/dev/null || true
         echo "iptables-tg" > "$TIB_DIR/mode"
         echo "  ✓ Правила добавлены в SCANNERS-BLOCK"
     else
         iptables -C INPUT -m set --match-set threat-block-v4 src -m conntrack --ctstate NEW -j DROP 2>/dev/null \
-            || iptables -I INPUT -m set --match-set threat-block-v4 src -m conntrack --ctstate NEW -j DROP
+            || iptables -I INPUT -m set --match-set threat-block-v4 src -m conntrack --ctstate NEW -j DROP || return 1
         ip6tables -C INPUT -m set --match-set threat-block-v6 src -m conntrack --ctstate NEW -j DROP 2>/dev/null \
             || ip6tables -I INPUT -m set --match-set threat-block-v6 src -m conntrack --ctstate NEW -j DROP 2>/dev/null || true
         echo "iptables" > "$TIB_DIR/mode"
