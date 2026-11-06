@@ -24,6 +24,7 @@ class DoHPermissionTests(unittest.TestCase):
         self.checker=self.root/'checker'
         self.checker.write_text('#!'+sys.executable+'''\nimport os,sys,tomllib
 from pathlib import Path
+assert os.getcwd()=='/'
 obj=tomllib.loads(Path(sys.argv[3]).read_text())
 assert obj['max_clients']==1000
 assert len(obj['static'])==2
@@ -43,7 +44,7 @@ sleep() { :; }
 systemctl() { echo "$*" >> "$CALLS"; return 0; }
 '''
 
-    def run_prepare(self, mask='077', real=False, fail=False):
+    def run_prepare(self, mask='077', real=False, fail=False, private=False):
         source=self.prepare
         prelude=self.prelude
         if real:
@@ -57,6 +58,7 @@ systemctl() { echo "$*" >> "$CALLS"; return 0; }
 import os,stat,sys
 from pathlib import Path
 assert sys.argv[1:4]==['-u','_dnscrypt-proxy','--']
+if os.environ.get('REQUIRE_CWD'): assert os.getcwd()=='/'
 p=Path(sys.argv[-1]); info=p.stat()
 assert stat.S_IMODE(info.st_mode)==0o640
 assert stat.S_IMODE(p.parent.stat().st_mode)==0o750
@@ -66,8 +68,11 @@ print('CHECKED_AS_SERVICE')
 CHECK
 }
 '''
+        cwd=self.root/'private'
+        if private: cwd.mkdir(mode=0o700,exist_ok=True)
         return subprocess.run(['bash','-c','umask '+mask+'\n'+prelude+source+'\n_nextdns_doh_prepare e57d7c'],
-                              text=True,capture_output=True,timeout=10,env=self.env|({'FAIL_CHECK':'1'} if fail else {}))
+                              text=True,capture_output=True,timeout=10,cwd=cwd if private else None,
+                              env=self.env|({'FAIL_CHECK':'1'} if fail else {})|({'REQUIRE_CWD':'1'} if private else {}))
 
     def assert_permissions(self, group):
         conf=self.config/'dnscrypt-proxy.toml'
@@ -78,6 +83,7 @@ CHECK
         unit=(self.root/'units/nextdns-doh.service')
         self.assertEqual(unit.stat().st_mode&0o777,0o644)
         self.assertIn('Group='+group,unit.read_text())
+        self.assertIn('WorkingDirectory=/\n',unit.read_text())
         self.assertFalse(list(self.config.glob('.dnscrypt-proxy.*')))
 
     def test_restrictive_mask_and_existing_root_only_file_are_repaired(self):
@@ -88,6 +94,16 @@ CHECK
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
             self.assertIn('CHECKED_AS_SERVICE',result.stdout)
             self.assert_permissions(grp.getgrgid(os.getgid()).gr_name)
+
+    def test_validation_uses_public_working_directory_from_private_cwd(self):
+        result=self.run_prepare(private=True)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+
+    @unittest.skipUnless(CAN_SWITCH,'executor cannot switch service UID; covered on CI')
+    def test_real_service_uid_validates_from_private_cwd(self):
+        result=self.run_prepare(real=True,private=True)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertIn('CHECK_UID='+str(pwd.getpwnam('nobody').pw_uid),result.stdout)
 
     def test_failed_service_user_check_preserves_old_config_and_no_service_changes(self):
         self.config.mkdir(); conf=self.config/'dnscrypt-proxy.toml';conf.write_text('old config')
