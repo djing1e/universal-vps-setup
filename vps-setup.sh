@@ -5484,7 +5484,12 @@ def main():
     lock = Path('/run/lock/vps-selfsteal-domain.lock')
     if lock.exists() or lock.is_symlink():
         secure(lock)
-    with lock.open('a') as stream:
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        os.close(fd)
+        raise ValueError('Небезопасный файл блокировки')
+    with os.fdopen(fd, 'a') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         def interrupted(signum, frame):
             raise RuntimeError('Операция прервана сигналом ' + str(signum))
