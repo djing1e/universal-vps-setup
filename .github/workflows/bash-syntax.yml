@@ -69,6 +69,14 @@ jobs:
           domain="$(python3 -c "print('.'.join(['a'*63]*3+['b'*61]))")"
           sudo python3 tests/check_nginx_selfsteal_real.py "$domain"
 
+  selfsteal-domain:
+    name: Real Caddy and Nginx domain change / rollback
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Change domains without restarting the node
+        run: sudo python3 tests/check_selfsteal_domain_real.py
+
   ubuntu-crowdsec:
     name: Ubuntu 24.04 packaged CrowdSec Hub
     runs-on: ubuntu-24.04
