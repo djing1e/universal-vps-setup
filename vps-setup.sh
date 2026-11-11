@@ -1214,6 +1214,75 @@ crowdsec_ensure_collection() {
     return 0
 }
 
+# Reinstall deleted package configuration only on an explicit install action.
+# Never replace existing local configuration and never silently ignore purge errors.
+crowdsec_restore_missing_config() {
+    local package="$1" required="$2" version backup parent
+    if [[ -L "$required" || ( -e "$required" && ! -f "$required" ) ]]; then
+        echo "ОШИБКА: нестандартная конфигурация $required; нужна ручная проверка."
+        return 1
+    fi
+    [[ ! -f "$required" ]] || return 0
+    for parent in /etc/crowdsec /etc/crowdsec/bouncers; do
+        if [[ -L "$parent" || ( -e "$parent" && ! -d "$parent" ) ]]; then
+            echo "ОШИБКА: нестандартный каталог $parent; восстановление отменено."
+            return 1
+        fi
+    done
+    if [[ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null)" != 'install ok installed' ]]; then
+        echo "ОШИБКА: пакет $package не настроен; восстановление конфигурации отменено."
+        return 1
+    fi
+    version=$(dpkg-query -W -f='${Version}' "$package") || return 1
+    [[ -n "$version" ]] || return 1
+    backup=$(mktemp -d /root/crowdsec-config-recovery.XXXXXXXX) || return 1
+    chmod 700 "$backup" || return 1
+    if [[ -d /etc/crowdsec ]]; then
+        cp -a /etc/crowdsec "$backup/" || return 1
+    fi
+    printf '%s %s\n' "$package" "$version" > "$backup/package.txt" || return 1
+    echo "Конфигурация $package отсутствует. Резервная копия: $backup"
+    echo 'Восстанавливаю отсутствующие файлы пакета; существующие конфиги сохраняются.'
+    if ! apt-get -o DPkg::Lock::Timeout=600 \
+        -o Dpkg::Options::=--force-confmiss -o Dpkg::Options::=--force-confold \
+        install --reinstall -y --no-remove "$package=$version"; then
+        echo "ОШИБКА: восстановление $package завершилось неудачно. Резервная копия: $backup"
+        return 1
+    fi
+    if [[ ! -f "$required" || -L "$required" ]]; then
+        echo "ОШИБКА: пакет переустановлен, но $required не восстановлен. Требуется ручная проверка."
+        return 1
+    fi
+}
+
+crowdsec_purge_packages() {
+    local package state
+    local packages=()
+    # APT aborts the entire transaction when any requested package is unknown.
+    # Include only packages actually recorded by dpkg, including residual configs.
+    for package in crowdsec crowdsec-firewall-bouncer \
+        crowdsec-firewall-bouncer-iptables crowdsec-firewall-bouncer-nftables; do
+        state=$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null) || continue
+        case "$state" in
+            *' installed'|*' config-files'|*' unpacked'|*' half-configured'|*' half-installed'|*' triggers-awaited'|*' triggers-pending')
+                packages+=("$package") ;;
+        esac
+    done
+    if (( ${#packages[@]} )); then
+        if ! apt-get -o DPkg::Lock::Timeout=600 purge -y "${packages[@]}"; then
+            echo 'ОШИБКА: удаление пакетов CrowdSec не завершено. Каталоги конфигурации и данных сохраняются.'
+            return 1
+        fi
+        for package in "${packages[@]}"; do
+            state=$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null) || continue
+            if [[ "$state" != *' not-installed' ]]; then
+                echo "ОШИБКА: $package остался в dpkg ($state). Ручная очистка каталогов отменена."
+                return 1
+            fi
+        done
+    fi
+}
+
 crowdsec_install() {
     local detail_log rc
     local -a results
@@ -1348,10 +1417,7 @@ crowdsec_install_impl() {
     fi
     sleep 3
 
-    if [ ! -f /etc/crowdsec/config.yaml ]; then
-        echo "ОШИБКА: config.yaml не создался!"
-        return 1
-    fi
+    crowdsec_restore_missing_config crowdsec /etc/crowdsec/config.yaml || return 1
     echo "✓ CrowdSec установлен."
 
     echo "=== [2/7] Установка коллекций ==="
@@ -1571,10 +1637,7 @@ EOF
     # Не создаём вторую регистрацию и не перевыпускаем API-ключ.
     local bouncer_config="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
     local bouncer_id_file="${bouncer_config}.id"
-    if [ ! -f "$bouncer_config" ]; then
-        echo "ОШИБКА: конфигурация Firewall Bouncer отсутствует."
-        return 1
-    fi
+    crowdsec_restore_missing_config "$cs_bouncer_pkg" "$bouncer_config" || return 1
 
     # Проверяем наличие ключа, не выводя секрет в терминал.
     if ! awk '
@@ -1673,10 +1736,7 @@ crowdsec_uninstall() {
     systemctl stop crowdsec 2>/dev/null || true
 
     # Удаляем пакеты до ручной очистки правил.
-    if ! apt-get purge -y crowdsec-firewall-bouncer-iptables crowdsec; then
-        echo "ОШИБКА: не удалось удалить пакеты CrowdSec."
-        return 1
-    fi
+    crowdsec_purge_packages || return 1
 
     # Удаляем только правила CrowdSec.
     local cmd chain
@@ -9738,9 +9798,11 @@ cleanup_legacy() {
     iptables  -F CROWDSEC_CHAIN 2>/dev/null || true; iptables  -X CROWDSEC_CHAIN 2>/dev/null || true
     ip6tables -F CROWDSEC_CHAIN 2>/dev/null || true; ip6tables -X CROWDSEC_CHAIN 2>/dev/null || true
     for s in $(ipset list -n 2>/dev/null | grep -i crowdsec); do ipset destroy "$s" 2>/dev/null || true; done
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get purge -y crowdsec crowdsec-firewall-bouncer-iptables crowdsec-firewall-bouncer-nftables >/dev/null 2>&1 || true
+    if ! command -v apt-get >/dev/null 2>&1; then
+        echo 'ОШИБКА: APT недоступен. Конфигурация и данные CrowdSec сохраняются.'
+        return 1
     fi
+    crowdsec_purge_packages || return 1
     rm -rf /etc/crowdsec /var/lib/crowdsec
     echo "  ✓ CrowdSec вычищен"
 
