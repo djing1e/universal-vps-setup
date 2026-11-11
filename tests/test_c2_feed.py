@@ -30,6 +30,17 @@ if (p / 'fail-list').exists() and 'list' in a:
     sys.exit(1)
 if a == ['list', 'tables']:
     if s['table']: print('table ip xtls_c2_feed')
+elif a == ['-j', 'list', 'chain', 'ip', 'xtls_c2_feed', 'output']:
+    if not s['chain'] or (p/'json-error').exists(): sys.exit(1)
+    if (p/'json-broken').exists(): print('{broken'); sys.exit(0)
+    rows=[]
+    for h, comment in s['rules']:
+        expr=[{'match':{'op':'in','left':{'concat':[{'payload':{'protocol':'ip','field':'daddr'}},{'payload':{'protocol':'tcp','field':'dport'}}]},'right':'@c2_pairs'}},{'counter':{'packets':0,'bytes':0}},{'drop':None}]
+        if comment!='xtls-c2-block' or (p/'marker-only').exists():expr=[{'counter':{'packets':1,'bytes':60}}]
+        row={'family':'ip','table':'xtls_c2_feed','chain':'output','handle':h,'comment':comment,'expr':expr}
+        if (p/'bad-handle').exists():row.pop('handle')
+        rows.append({'rule':row})
+    print(json.dumps({'nftables':rows}))
 elif a in (['list', 'chain', 'ip', 'xtls_c2_feed', 'output'],
            ['-a', 'list', 'chain', 'ip', 'xtls_c2_feed', 'output']):
     if not s['chain']: sys.exit(1)
@@ -168,6 +179,24 @@ class C2Tests(unittest.TestCase):
         calls = (self.root / 'systemctl-calls').read_text().splitlines()
         self.assertTrue(all(call.startswith('is-enabled ') for call in calls))
 
+    def test_block_entrypoints_remove_only_duplicate_drop_keep_first_handle(self):
+        for action in ('enable-block','update','restore'):
+            self.stale()
+            (self.cache/'mode').write_text('block\n')
+            self.run_cli(action,answer='ENABLE-C2-BLOCK\n' if action=='enable-block' else '')
+            self.assertEqual(self.state()['rules'],[[3,'xtls-c2-block'],[4,'unrelated']])
+            self.assertEqual((self.cache/'mode').read_text(),'block\n')
+    def test_noncanonical_owned_rule_never_deleted_or_replaced(self):
+        self.stale();(self.cache/'mode').write_text('block\n')
+        (self.root/'marker-only').touch()
+        before=self.state()['rules']
+        self.run_cli('restore',ok=False)
+        self.assertEqual(self.state()['rules'],before)
+    def test_delete_failure_keeps_at_least_original_block_and_reports_failure(self):
+        self.stale();(self.cache/'mode').write_text('block\n')
+        (self.root/'fail-delete').touch()
+        self.run_cli('restore',ok=False)
+        self.assertIn([3,'xtls-c2-block'],self.state()['rules'])
     def test_delete_all_tagged_handles_preserve_unrelated(self):
         self.stale()
         self.run_cli('disable-block')

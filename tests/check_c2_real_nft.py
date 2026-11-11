@@ -44,6 +44,20 @@ def check(parent_ns):
         fixture.run_cli('disable-block')
         assert 'xtls-c2-block' not in rules()
         assert 'comment "unrelated"' in rules()
+        # Repair pre-existing duplicates in block mode, preserving the first
+        # rule/counter and unrelated rules on every mutating entrypoint.
+        for action in ['restore', 'update', 'enable-block']:
+            fixture.run_cli('enable-block', answer='ENABLE-C2-BLOCK\n')
+            import json
+            snapshot=json.loads(command('-j','list','chain','ip','xtls_c2_feed','output'))
+            first=next(row['rule']['handle'] for row in snapshot['nftables'] if row.get('rule',{}).get('comment')=='xtls-c2-block')
+            command('add rule ip xtls_c2_feed output ip daddr . tcp dport @c2_pairs counter drop comment "xtls-c2-block"')
+            fixture.run_cli(action,answer='ENABLE-C2-BLOCK\n' if action=='enable-block' else '')
+            assert rules().count('comment "xtls-c2-block"')==1
+            snapshot=json.loads(command('-j','list','chain','ip','xtls_c2_feed','output'))
+            assert next(row['rule']['handle'] for row in snapshot['nftables'] if row.get('rule',{}).get('comment')=='xtls-c2-block')==first
+            assert 'comment "unrelated"' in rules()
+            fixture.run_cli('disable-block')
         assert before == command('list', 'set', 'ip', 'xtls_c2_feed', 'c2_pairs')
         # Heal the originally reported mismatch through both service entrypoints.
         for action in ['update', 'restore']:

@@ -21,7 +21,7 @@ class UniversalC2Tests(unittest.TestCase):
         for name in ('mode', 'validated.csv'):
             (self.f.cache / name).unlink()
         self.f.save_state(dict(table=False, chain=False, set=False, rules=[], next=2, elements=[]))
-        self.helper = TCP
+        self.helper = TCP.replace('/root/xtls-c2-upgrade.',str(self.f.root/'backup.'))
         for prefix in ['/etc/', '/run/', '/usr/local/']:
             self.helper = self.helper.replace(prefix, f'{self.f.root}{prefix}')
         self.helper = 'xtls_c2_write_embedded_module() { cat "' + str(self.f.script) + '"; }\n' + self.helper
@@ -31,15 +31,6 @@ class UniversalC2Tests(unittest.TestCase):
         nft = self.f.bin / 'nft'
         data = nft.read_text()
         marker = "elif a in (['list', 'chain', 'ip', 'xtls_c2_feed', 'output'],"
-        data = data.replace(marker, """elif a == ['-j', 'list', 'chain', 'ip', 'xtls_c2_feed', 'output']:
-    if (p/'json-error').exists(): sys.exit(1)
-    if (p/'json-broken').exists(): print('{broken'); sys.exit(0)
-    rows=[]
-    for h, comment in s['rules']:
-        expr=[{'drop':None}] if comment=='xtls-c2-block' and not (p/'marker-only').exists() else [{'counter':{'packets':0,'bytes':0}}]
-        rows.append({'rule':{'family':'ip','table':'xtls_c2_feed','chain':'output','handle':h,'comment':comment,'expr':expr}})
-    print(json.dumps({'nftables':rows}))
-""" + marker)
         data = data.replace("        print(f'  {expr} comment \"{comment}\" {handle}')", "        quote='' if (p/'unquoted').exists() else chr(34)\n        print(f'  {expr} comment {quote}{comment}{quote} {handle}')")
         nft.write_text(data)
 
@@ -55,6 +46,19 @@ class UniversalC2Tests(unittest.TestCase):
             self.assertEqual([r[1] for r in self.f.state()['rules']], ['xtls-c2-block'])
             self.assertIn('1.1.1.1 . 8443', self.f.state()['elements'][0])
         self.assertTrue((self.f.root / 'etc/systemd/system/xtls-c2-feed-update.timer').exists())
+
+    def test_known_previous_release_is_backed_up_and_upgraded(self):
+        import hashlib
+        old=(ROOT/'tests/fixtures/xtls-c2-feed-pre-normalize.sh').read_bytes()
+        self.assertEqual(hashlib.sha256(old).hexdigest(),'1c1aa5912fa87a867da6a606c0584b31a250c6362fb1c27105e49291e0076939')
+        target=self.f.root/'usr/local/sbin/xtls-c2-feed'
+        target.write_bytes(old);target.chmod(0o755)
+        result=self.run_install()
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        backup=list(self.f.root.glob('backup.*/xtls-c2-feed'))
+        self.assertEqual(len(backup),1)
+        self.assertEqual(backup[0].read_bytes(),old)
+        self.assertEqual([r[1] for r in self.f.state()['rules']],['xtls-c2-block'])
 
     def test_human_comment_quoting_does_not_turn_successful_drop_into_failure(self):
         (self.f.root / 'unquoted').touch()
