@@ -9490,7 +9490,9 @@ try:
         if Path(directory).is_symlink(): raise ValueError(f'symlink: {directory}')
     if target.exists() or target.is_symlink():
         regular(target)
-        if target.read_bytes()!=source: raise ValueError('неизвестная версия TCP C2; автоматическая замена отменена')
+        old=target.read_bytes()
+        if old!=source and hashlib.sha256(old).hexdigest()!='1c1aa5912fa87a867da6a606c0584b31a250c6362fb1c27105e49291e0076939':
+            raise ValueError('неизвестная версия TCP C2; автоматическая замена отменена')
     units=re.findall(r"cat >(/etc/systemd/system/xtls-c2-feed-[^ ]+) <<'UNIT'\n(.*?)\nUNIT",source.decode(),re.S)
     if len(units)!=3: raise ValueError('не удалось проверить C2 unit templates')
     for name,body in units:
@@ -9511,6 +9513,12 @@ PY_C2_PREFLIGHT
     if [[ ! -e "$target" ]] && nft list table ip xtls_c2_feed >/dev/null 2>&1; then
         echo 'Таблица C2 есть, но её модуль неизвестен. Нужна ручная проверка.'
         return 1
+    fi
+    if [[ -f "$target" ]] && ! cmp -s "$target" "$work/module.sh"; then
+        local backup
+        backup=$(mktemp -d /root/xtls-c2-upgrade.XXXXXXXX) || return 1
+        cp -a "$target" "$backup/xtls-c2-feed" || return 1
+        echo "Резервная копия C2: $backup"
     fi
     bash "$work/module.sh" install || return 1
     # The batch preview and yes explicitly authorize this activation.
@@ -10024,6 +10032,62 @@ remove_rules() {
  fi
 }
 
+# Called under the existing module lock. Keep one canonical rule and its
+# counter; delete only validated duplicates, without a gap in blocking.
+block_rule_plan() {
+ python3 - "$1" <<'PY_C2_RULE_PLAN'
+import json,sys
+from pathlib import Path
+try:
+    data=json.loads(Path(sys.argv[1]).read_text())
+    rules=[row['rule'] for row in data['nftables'] if 'rule' in row]
+    owned=[r for r in rules if r.get('comment')=='xtls-c2-block']
+    expected={'concat':[{'payload':{'protocol':'ip','field':'daddr'}},
+                        {'payload':{'protocol':'tcp','field':'dport'}}]}
+    handles=[]
+    for rule in owned:
+        expr=rule.get('expr',[])
+        match=expr[0].get('match',{}) if expr else {}
+        if (rule.get('family')!='ip' or rule.get('table')!='xtls_c2_feed' or
+            rule.get('chain')!='output' or len(expr)!=3 or
+            match.get('op') not in ('==','in') or match.get('left')!=expected or
+            match.get('right')!='@c2_pairs' or set(expr[1])!={'counter'} or
+            expr[2]!={'drop':None} or type(rule.get('handle')) is not int or
+            rule['handle']<=0):
+            raise ValueError('нестандартное правило xtls-c2-block; требуется ручная проверка')
+        handles.append(rule['handle'])
+    if len(set(handles))!=len(handles):
+        raise ValueError('повторяющиеся handles в nft JSON')
+    if not handles:
+        print('add')
+    for handle in handles[1:]:
+        print('delete',handle)
+except (OSError,ValueError,KeyError,TypeError,IndexError,AttributeError) as error:
+    print('Проверка TCP C2: '+str(error),file=sys.stderr)
+    sys.exit(1)
+PY_C2_RULE_PLAN
+}
+ensure_block_rule() {
+ local work actions action handle pending
+ work=$(mktemp -d) || return 1
+ if ! nft -j list chain ip "$TABLE" output > "$work/rules.json"; then
+   rm -rf "$work"; echo 'Проверка TCP C2: не удалось прочитать цепочку' >&2; return 1
+ fi
+ actions=$(block_rule_plan "$work/rules.json") || { rm -rf "$work"; return 1; }
+ while read -r action handle; do
+   case "$action" in
+     add) nft add rule ip "$TABLE" output ip daddr . tcp dport @c2_pairs counter drop comment '"xtls-c2-block"' || { rm -rf "$work"; return 1; } ;;
+     delete) nft delete rule ip "$TABLE" output handle "$handle" || { rm -rf "$work"; return 1; } ;;
+     '') ;;
+     *) rm -rf "$work"; return 1 ;;
+   esac
+ done <<< "$actions"
+ nft -j list chain ip "$TABLE" output > "$work/rules.json" || { rm -rf "$work"; return 1; }
+ pending=$(block_rule_plan "$work/rules.json") || { rm -rf "$work"; return 1; }
+ rm -rf "$work"
+ [[ -z "$pending" ]] || { echo 'Проверка TCP C2: нормализация правила не подтверждена' >&2; return 1; }
+}
+
 restore_locked() {
  local tmp m
  m=$(saved_mode) || return 1
@@ -10033,11 +10097,7 @@ restore_locked() {
  tmp=$(mktemp -d)
  validate_and_apply "$tmp" "$CSV" || { rm -rf "$tmp"; return 1; }
  rm -rf "$tmp"
- if [[ "$m" == block ]]; then
-   if [[ "$(mode)" != block ]]; then
-     nft add rule ip "$TABLE" output ip daddr . tcp dport @c2_pairs counter drop comment '"xtls-c2-block"'
-   fi
- fi
+ if [[ "$m" == block ]]; then ensure_block_rule || return 1; fi
  echo "Restored. Mode: $m"
 }
 restore() ( lock; restore_locked; )
@@ -10060,9 +10120,7 @@ update() (
  install -m 600 "$tmp/validated" "$ROOT/.validated.new"
  mv -f "$ROOT/.validated.new" "$CSV"
  rm -rf "$tmp"
- if [[ "$m" == block && "$(mode)" != block ]]; then
-   nft add rule ip "$TABLE" output ip daddr . tcp dport @c2_pairs counter drop comment '"xtls-c2-block"'
- fi
+ if [[ "$m" == block ]]; then ensure_block_rule || return 1; fi
  echo "Updated. Mode: $(mode)"
 )
 install_module() {
@@ -10119,9 +10177,7 @@ block() {
  tmp=$(mktemp -d)
  validate_and_apply "$tmp" "$CSV" || { rm -rf "$tmp"; return 1; }
  rm -rf "$tmp"
- if [[ "$(mode)" != block ]]; then
-   nft add rule ip "$TABLE" output ip daddr . tcp dport @c2_pairs counter drop comment '"xtls-c2-block"'
- fi
+ ensure_block_rule || return 1
  write_mode block
  echo 'Blocking enabled and persisted'
 }
