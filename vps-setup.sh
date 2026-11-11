@@ -5152,8 +5152,8 @@ setup_remnanode() {
     echo "╚══════════════════════════════════════════╝"
     echo ""
     echo "  1) Встроенный установщик"
-    echo "     remnanode + Caddy 2, OOM watcher, logrotate,"
-    echo "     Cloudflare DNS Challenge (опционально)"
+    echo "     remnanode + Caddy 2 или Nginx SelfSteal, OOM watcher, logrotate,"
+    echo "     Cloudflare DNS Challenge для Caddy (опционально)"
     echo ""
     echo "  2) eGamesAPI reverse-proxy скрипт"
     echo "     github.com/eGamesAPI/remnawave-reverse-proxy"
@@ -5188,7 +5188,258 @@ setup_remnanode() {
   done
 }
 
+rn_create_nginx_config() {
+  mkdir -p "${RN_INSTALL_DIR}/nginx-selfsteal" /var/www/letsencrypt/.well-known/acme-challenge || return 1
+  # Root umask is 077. nginx workers need traverse permission on ACME dirs.
+  chmod 755 /var/www/letsencrypt /var/www/letsencrypt/.well-known /var/www/letsencrypt/.well-known/acme-challenge || return 1
+  cat > "${RN_INSTALL_DIR}/nginx-selfsteal/nginx.conf" <<EOF || return 1
+worker_processes auto;
+pid /tmp/nginx.pid;
+events { worker_connections 8192; }
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    server_tokens off;
+    sendfile on;
+    tcp_nopush on;
+    keepalive_timeout 65;
+    server {
+        listen 0.0.0.0:80;
+        server_name ${RN_DOMAIN};
+        location ^~ /.well-known/acme-challenge/ {
+            root /var/www/letsencrypt;
+            default_type text/plain;
+            try_files \$uri =404;
+        }
+        location / { return 301 https://${RN_DOMAIN}\$request_uri; }
+    }
+    server {
+        listen 0.0.0.0:80 default_server;
+        server_name _;
+        return 204;
+    }
+    server {
+        listen unix:/dev/shm/nginx.sock ssl proxy_protocol;
+        server_name ${RN_DOMAIN};
+        ssl_certificate /etc/letsencrypt/live/${RN_DOMAIN}/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/${RN_DOMAIN}/privkey.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_session_cache shared:SSL:10m;
+        ssl_session_timeout 1d;
+        http2 on;
+        root /var/www/html;
+        index index.html;
+        location / { try_files \$uri \$uri/ /index.html; }
+    }
+}
+EOF
+  chmod 600 "${RN_INSTALL_DIR}/nginx-selfsteal/nginx.conf"
+}
+
+rn_nginx_create_hook() {
+  local hook=/etc/letsencrypt/renewal-hooks/deploy/reload-nginx-selfsteal.sh
+  mkdir -p "$(dirname "$hook")" || return 1
+  cat > "$hook" <<'EOF' || return 1
+#!/bin/sh
+set -eu
+if [ -n "${RENEWED_DOMAINS:-}" ]; then
+  case " ${RENEWED_DOMAINS} " in *" fr.xtls.win "*) : ;; *) exit 0 ;; esac
+fi
+if docker inspect -f '{{.State.Running}}' nginx-selfsteal 2>/dev/null | grep -qx true; then
+  docker exec nginx-selfsteal nginx -s reload
+fi
+EOF
+  # Replace the placeholder with the actual target domain, safely.
+  HOOK_DOMAIN="${RN_DOMAIN}" python3 - "$hook" <<'PY' || return 1
+import os,pathlib,sys
+p=pathlib.Path(sys.argv[1]);p.write_text(p.read_text().replace('fr.xtls.win',os.environ['HOOK_DOMAIN']))
+PY
+  chmod 755 "$hook"
+}
+
+rn_nginx_tls_test() {
+  DOMAIN="${RN_DOMAIN}" python3 - <<'PY'
+import os, socket, ssl
+name=os.environ['DOMAIN']
+s=socket.socket(socket.AF_UNIX)
+s.settimeout(10)
+s.connect('/dev/shm/nginx.sock')
+s.sendall(b'PROXY TCP4 127.0.0.2 127.0.0.1 12345 443\r\n')
+ctx=ssl.create_default_context()
+with ctx.wrap_socket(s, server_hostname=name) as tls:
+    tls.sendall((f'GET / HTTP/1.1\r\nHost: {name}\r\nConnection: close\r\n\r\n').encode())
+    head=tls.recv(4096)
+    if not head.startswith(b'HTTP/1.1 200'):
+        raise SystemExit('SelfSteal unexpected HTTP status: '+repr(head[:100]))
+    print('TLS:',tls.version(), ' HTTP: 200 OK')
+PY
+}
+
+
+# Fresh installation only. Migration of an existing node is a separate operation.
+rn_nginx_preflight() {
+  [[ "$RN_DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ && "$RN_DOMAIN" == *.* && "$RN_DOMAIN" != *..* ]] || {
+    rn_error "Некорректный домен SelfSteal"; return 1;
+  }
+  [[ "$RN_INSTALL_DIR" == /* && "$RN_INSTALL_DIR" != / && "$RN_INSTALL_DIR" =~ ^/[a-zA-Z0-9_./-]+$ ]] || {
+    rn_error "Нужен абсолютный путь без пробелов и специальных символов"; return 1;
+  }
+  if [[ -L "$RN_INSTALL_DIR" ]] || { [[ -d "$RN_INSTALL_DIR" ]] && [[ -n "$(ls -A "$RN_INSTALL_DIR")" ]]; }; then
+    rn_error "Каталог уже занят: $RN_INSTALL_DIR. Для существующей ноды используйте отдельный мигратор."; return 1
+  fi
+  [[ "$(realpath -m "$RN_INSTALL_DIR")" == "$RN_INSTALL_DIR" ]] || {
+    rn_error "Путь содержит symlink или неоднозначные компоненты"; return 1;
+  }
+  if [[ -e "/etc/letsencrypt/renewal/$RN_DOMAIN.conf" || -L "/etc/letsencrypt/renewal/$RN_DOMAIN.conf" ]]; then
+    rn_error "Для домена уже есть Certbot renewal; существующая конфигурация сохраняется"; return 1
+  fi
+  local name
+  if command -v docker >/dev/null 2>&1; then
+    docker info >/dev/null 2>&1 || { rn_error "Docker недоступен; состояние существующих контейнеров неизвестно"; return 1; }
+    for name in remnanode caddy-remnanode nginx-selfsteal; do
+      if docker inspect "$name" >/dev/null 2>&1; then
+        rn_error "Контейнер $name уже существует; новая установка отменена"; return 1
+      fi
+    done
+  fi
+  if [[ -e /dev/shm/nginx.sock || -L /dev/shm/nginx.sock ]] ||
+     ss -H -lnt '( sport = :80 or sport = :443 )' | grep -q .; then
+    rn_error "Порт 80/443 или SelfSteal-сокет занят; существующий сервис не останавливается"; return 1
+  fi
+  if [[ -e /etc/letsencrypt/renewal-hooks/deploy/reload-nginx-selfsteal.sh || -L /etc/letsencrypt/renewal-hooks/deploy/reload-nginx-selfsteal.sh ]]; then
+    rn_error "Certbot hook уже существует; требуется ручная проверка"; return 1
+  fi
+}
+
+rn_create_nginx_compose() {
+  # Quote environment values with JSON (also valid YAML), escape Compose interpolation.
+  RN_COMPOSE_DOMAIN="$RN_DOMAIN" python3 - <<'PY_COMPOSE'
+import json, os
+from pathlib import Path
+# Values are supplied through environment by the caller, never command arguments.
+p=Path(os.environ['RN_INSTALL_DIR'])/'docker-compose.yml'
+q=lambda x: json.dumps(x.replace('$','$$'))
+s='''services:
+  nginx:
+    image: nginx:stable-alpine
+    container_name: nginx-selfsteal
+    hostname: nginx-selfsteal
+    restart: always
+    network_mode: host
+    volumes:
+      - ./nginx-selfsteal/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /var/www/html:/var/www/html:ro
+      - /var/www/letsencrypt:/var/www/letsencrypt:ro
+      - /dev/shm:/dev/shm:rw
+    logging:
+      driver: json-file
+      options:
+        max-size: 100m
+        max-file: "5"
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /dev/shm/nginx.sock && nginx -t"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+  remnanode:
+    container_name: remnanode
+    hostname: remnanode
+    image: '''+q('remnawave/node:'+os.environ['RN_NODE_VERSION'])+'''
+    network_mode: host
+    restart: always
+    cap_add: [NET_ADMIN]
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    volumes:
+      - /var/log/remnanode:/var/log/remnanode
+      - /dev/shm:/dev/shm:rw
+    environment:
+      NODE_PORT: '''+q(os.environ['RN_NODE_PORT'])+'''
+      SECRET_KEY: '''+q(os.environ['RN_SECRET_KEY'])+'\n'
+if os.environ['RN_XHTTP_MODE']=='true':
+    limit=q(os.environ['RN_MEM_LIMIT'])
+    s+='    mem_limit: '+limit+'\n    memswap_limit: '+limit+'\n'
+p.write_text(s); p.chmod(0o600)
+PY_COMPOSE
+}
+
+rn_install_nginx_selfsteal() (
+  # Isolate environment exports, working directory and private-file permissions.
+  umask 077
+  export RN_INSTALL_DIR RN_NODE_VERSION RN_NODE_PORT RN_SECRET_KEY RN_XHTTP_MODE RN_MEM_LIMIT
+  RN_CF_MODE=false
+  rn_nginx_preflight || return 1
+  rn_install_deps || return 1
+  apt-get -o DPkg::Lock::Timeout=600 install -y --no-remove certbot openssl curl python3 || return 1
+  rn_prepare_dirs || return 1
+  rn_create_stub || return 1
+  # A fresh node needs a page for the post-installation HTTP 200 probe.
+  if [[ ! -e /var/www/html/index.html ]]; then
+    printf '%s\n' '<!doctype html><html><head><title>Welcome</title></head><body><h1>Welcome</h1></body></html>' > /var/www/html/index.html || return 1
+    chmod 644 /var/www/html/index.html || return 1
+  fi
+  rn_create_nginx_config || return 1
+  rn_create_nginx_compose || return 1
+  cd "$RN_INSTALL_DIR" || return 1
+  rn_compose config -q || return 1
+  rn_compose pull || return 1
+  echo "Для HTTP-01 домен $RN_DOMAIN должен указывать на VPS, TCP 80 должен быть доступен извне."
+  # Port 80 is needed for issuance AND all subsequent renewals. No existing service is stopped.
+  if command -v ufw >/dev/null 2>&1; then ufw allow 80/tcp || return 1; fi
+  certbot certonly --standalone --preferred-challenges http \
+    --cert-name "$RN_DOMAIN" -d "$RN_DOMAIN" --non-interactive \
+    --agree-tos --register-unsafely-without-email || return 1
+  docker run --rm --network host --entrypoint nginx \
+    -v "$RN_INSTALL_DIR/nginx-selfsteal/nginx.conf:/etc/nginx/nginx.conf:ro" \
+    -v /etc/letsencrypt:/etc/letsencrypt:ro \
+    -v /var/www/html:/var/www/html:ro \
+    -v /var/www/letsencrypt:/var/www/letsencrypt:ro \
+    -v /dev/shm:/dev/shm:rw nginx:stable-alpine -t || return 1
+  rn_compose up -d --no-deps nginx || return 1
+  local ready=false attempt
+  for attempt in {1..15}; do
+    if rn_nginx_tls_test; then ready=true; break; fi
+    sleep 1
+  done
+  [[ "$ready" == true ]] || { rn_error "Nginx TLS/HTTP проверка не пройдена; Remnanode не запущен"; return 1; }
+  certbot reconfigure --cert-name "$RN_DOMAIN" --authenticator webroot \
+    --webroot-path /var/www/letsencrypt --non-interactive || return 1
+  rn_nginx_create_hook || return 1
+  systemctl enable --now certbot.timer || return 1
+  certbot renew --cert-name "$RN_DOMAIN" --dry-run --non-interactive || return 1
+  RENEWED_DOMAINS="$RN_DOMAIN" /etc/letsencrypt/renewal-hooks/deploy/reload-nginx-selfsteal.sh || return 1
+  # Start the node only after TLS and automatic renewal have been verified.
+  rn_compose up -d --no-deps remnanode || return 1
+  [[ -n "$(rn_compose ps -q remnanode)" ]] || return 1
+  rn_setup_oom_watcher || return 1
+  rn_setup_logrotate || return 1
+  rn_open_panel_port || return 1
+  rn_print_summary
+  echo "SelfSteal: Nginx; сертификаты: Certbot HTTP-01 + certbot.timer."
+  echo "Xray Reality target: /dev/shm/nginx.sock, xver: 1 (PROXY protocol)."
+)
+
 setup_remnanode_builtin() {
+    local RN_WEB_SERVER
+    echo "SelfSteal: выберите веб-сервер"
+    echo "  1) Caddy 2 (Cloudflare DNS Challenge опционально)"
+    echo "  2) Nginx + Certbot (HTTP-01, нужен доступный TCP 80)"
+    echo "  0) Назад"
+    read -rep "Выбор [0-2, Enter = 1]: " RN_WEB_SERVER || return 1
+    case "${RN_WEB_SERVER:-1}" in
+      0) return 0 ;;
+      1) ;;
+      2)
+        rn_choose_install_dir || return 1
+        rn_ask_params || return 1
+        rn_install_nginx_selfsteal
+        return $? ;;
+      *) rn_error "Неверный выбор"; return 1 ;;
+    esac
     print_header
     echo "╔══════════════════════════════════════╗"
     echo "║   Установка remnanode + Caddy        ║"
