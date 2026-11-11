@@ -64,7 +64,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Real Nginx TLS, PROXY protocol and certificate webroot
-        run: sudo python3 tests/check_nginx_selfsteal_real.py
+        run: |
+          sudo python3 tests/check_nginx_selfsteal_real.py
+          domain="$(python3 -c "print('.'.join(['a'*63]*3+['b'*61]))")"
+          sudo python3 tests/check_nginx_selfsteal_real.py "$domain"
 
   ubuntu-crowdsec:
     name: Ubuntu 24.04 packaged CrowdSec Hub

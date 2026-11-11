@@ -5200,6 +5200,7 @@ http {
     include /etc/nginx/mime.types;
     default_type application/octet-stream;
     server_tokens off;
+    server_names_hash_bucket_size 512;
     sendfile on;
     tcp_nopush on;
     keepalive_timeout 65;
