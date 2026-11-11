@@ -4,8 +4,8 @@ set -euo pipefail
 umask 077
 
 # Pin the payload independently of the mutable bootstrap URL.
-SOURCE_REVISION=dde53c2a21ca66673f4516e324b40de3462992e7
-SCRIPT_SHA256=e0cd4c5626e44a91b1c2162dd13941e7eb017ddb8985a852d9f140b7ad364550
+SOURCE_REVISION=cc68dbb01cba590494962359c5cc6ddf92336dd5
+SCRIPT_SHA256=b4c878019530536afd1a43a81a5e4ae811b393079701158d2806333ba4982e40
 SOURCE_URL="https://raw.githubusercontent.com/djing1e/universal-vps-setup/${SOURCE_REVISION}/vps-setup.sh"
 TARGET=/usr/local/sbin/vps-setup
 LAUNCHER=/usr/local/bin/vps-setup

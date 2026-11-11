@@ -77,6 +77,21 @@ jobs:
       - name: Change domains without restarting the node
         run: sudo python3 tests/check_selfsteal_domain_real.py
 
+  debian-crowdsec-recovery:
+    name: Debian 13 CrowdSec missing configs and purge
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Recover actual package configs and remove distribution bouncer
+        run: |
+          docker run --rm -v "$PWD:/repo:ro" debian:13 bash -ec '
+            printf "#!/bin/sh\nexit 101\n" > /usr/sbin/policy-rc.d
+            chmod 755 /usr/sbin/policy-rc.d
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-remove python3 crowdsec crowdsec-firewall-bouncer
+            python3 /repo/tests/check_crowdsec_recovery_real.py
+          '
+
   ubuntu-crowdsec:
     name: Ubuntu 24.04 packaged CrowdSec Hub
     runs-on: ubuntu-24.04
