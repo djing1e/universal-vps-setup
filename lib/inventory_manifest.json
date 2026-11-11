@@ -1,10 +1,11 @@
 {
-  "reference_commit": "5e5b47c6693c1e51634c3ba8017aa4923b561ee9",
+  "reference_commit": "83ff94d3dc43ec80e49e23ee10e2613920031f2f",
   "files": [
     {
       "path": "/usr/local/sbin/xtls-c2-feed",
       "sha256": [
-        "1c1aa5912fa87a867da6a606c0584b31a250c6362fb1c27105e49291e0076939"
+        "1c1aa5912fa87a867da6a606c0584b31a250c6362fb1c27105e49291e0076939",
+        "42e5b397f36fd1af137e601f2446a463c717539998db57e7f7c7039fccb3fbd2"
       ]
     },
     {
