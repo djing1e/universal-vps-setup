@@ -33,6 +33,7 @@ ss() { :; }
         self.assertIn('ssl proxy_protocol;',conf)
         self.assertNotIn('listen 443',conf)
         self.assertIn('http2 on;',conf)
+        self.assertIn('server_names_hash_bucket_size 512;',conf)
         self.assertIn('location ^~ /.well-known/acme-challenge/',conf)
         compose=(self.install/'docker-compose.yml').read_text()
         self.assertIn('SECRET_KEY: "a$$secret:\\"key"',compose)
