@@ -27,7 +27,13 @@ try:
     challenge=www/'letsencrypt/.well-known/acme-challenge/probe';challenge.write_text('acme-token');challenge.chmod(0o644)
     shared=fixture.root/'shm';shared.mkdir()
     compose=json.loads(run('docker','compose','-f',str(fixture.install/'docker-compose.yml'),'config','--format','json'))
-    assert compose['services']['remnanode']['environment']['SECRET_KEY']==fixture.env['RN_SECRET_KEY']
+    # Compose config serializes dollars as $$ for subsequent YAML round-tripping.
+    # Verify the actual container environment instead of the serialized form.
+    override=fixture.root/'override.yml'
+    override.write_text('services:\n  remnanode:\n    image: nginx:stable-alpine\n')
+    environment=run('docker','compose','-p',name,'-f',str(fixture.install/'docker-compose.yml'),
+                    '-f',str(override),'run','--rm','--no-deps','--entrypoint','env','remnanode')
+    assert 'SECRET_KEY='+fixture.env['RN_SECRET_KEY'] in environment.splitlines()
     volumes=[]
     for src,dst in [(conf,'/etc/nginx/nginx.conf'),(certs,'/etc/letsencrypt'),(www/'html','/var/www/html'),(www/'letsencrypt','/var/www/letsencrypt'),(shared,'/dev/shm')]:
         volumes+=['-v',str(src)+':'+dst+('' if dst=='/dev/shm' else ':ro')]
