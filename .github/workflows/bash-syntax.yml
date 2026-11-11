@@ -58,6 +58,14 @@ jobs:
       - name: C2 real nftables regression tests in a network namespace
         run: sudo python3 tests/check_c2_real_nft.py
 
+  nginx-selfsteal:
+    name: Nginx SelfSteal fresh-install configuration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Real Nginx TLS, PROXY protocol and certificate webroot
+        run: sudo python3 tests/check_nginx_selfsteal_real.py
+
   ubuntu-crowdsec:
     name: Ubuntu 24.04 packaged CrowdSec Hub
     runs-on: ubuntu-24.04
