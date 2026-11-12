@@ -140,10 +140,54 @@ wait_for_dns() {
     return 1
 }
 
+# Parse feed data only; never execute upstream IPSet commands.
+# Exit 3 is reserved for the upstream's explicit empty IPv6 declaration.
+asb_extract_feed() {
+    python3 - "$@" <<'AS_FEED_PY'
+import ipaddress, pathlib, sys
+source, version, output = sys.argv[1:]
+v = int(version)
+commands = [line.split() for line in pathlib.Path(source).read_text().splitlines()
+            if line.strip() and not line.lstrip().startswith('#')]
+name = f'blacklist-v{v}'
+creates = [c for c in commands if c[0] == 'create']
+if len(creates) != 1:
+    raise ValueError(f'IPv{v}: invalid create count')
+c = creates[0]
+if len(c) < 5 or c[:3] != ['create', name, 'hash:net'] or len(c[3:]) % 2:
+    raise ValueError(f'IPv{v}: malformed create')
+options = dict(zip(c[3::2], c[4::2]))
+if len(options)*2 != len(c[3:]) or set(options) - {'family','hashsize','maxelem'}:
+    raise ValueError(f'IPv{v}: unexpected create options')
+if options.get('family') != ('inet' if v == 4 else 'inet6'):
+    raise ValueError(f'IPv{v}: wrong create family')
+for key in ('hashsize','maxelem'):
+    if key in options and not options[key].isdigit():
+        raise ValueError(f'IPv{v}: invalid {key}')
+nets = set()
+for c in commands:
+    if c[0] == 'create': continue
+    if len(c) != 3 or c[:2] != ['add',name]:
+        raise ValueError(f'IPv{v}: unexpected command')
+    net = ipaddress.ip_network(c[2], strict=False)
+    if net.version != v: raise ValueError(f'IPv{v}: wrong address family')
+    nets.add(str(net))
+if v == 6 and not nets and options.get('maxelem') == '0':
+    pathlib.Path(output).write_text('')
+    sys.exit(3)
+if len(nets) < (100 if v == 4 else 5):
+    raise ValueError(f'IPv{v}: suspiciously short list ({len(nets)})')
+pathlib.Path(output).write_text(''.join(n+'\n' for n in sorted(nets)))
+AS_FEED_PY
+}
+
 # Managed AS/Threat IPSet persistence: no global iptables-restore.
 install_managed_blocklist_runtime() {
     install -d -m 700 /usr/local/sbin /usr/local/bin
-    cat > /usr/local/bin/firewall-blocklist-update.sh <<'MANAGED_UPDATER'
+    {
+    printf '#!/usr/bin/env bash\n'
+    declare -f asb_extract_feed
+    cat <<'MANAGED_UPDATER'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 umask 077
@@ -159,6 +203,7 @@ STAGE4="fwstage4-$$"
 STAGE6="fwstage6-$$"
 SWAP4=0
 SWAP6=0
+SKIP6=0
 COMMITTED=0
 
 if [[ $MODE == as ]]; then
@@ -212,28 +257,14 @@ if [[ $MODE == as ]]; then
             exit 1
         fi
     done
-    python3 - "$WORK" <<'PY'
-import ipaddress, pathlib, sys
-p=pathlib.Path(sys.argv[1])
-for v,minimum in ((4,100),(6,5)):
-    lines=(p/f'source{v}').read_text().splitlines()
-    commands=[line.split() for line in lines if line.strip() and not line.lstrip().startswith('#')]
-    expected=f'blacklist-v{v}'
-    if len([c for c in commands if c[0]=='create']) != 1:
-        raise ValueError(f'IPv{v}: invalid create count')
-    if any(c[0] not in ('create','add') for c in commands):
-        raise ValueError(f'IPv{v}: unexpected command')
-    if any(len(c)!=3 or c[1]!=expected for c in commands if c[0]=='add'):
-        raise ValueError(f'IPv{v}: malformed add')
-    cidrs=set()
-    for c in commands:
-        if c[0]=='add':
-            net=ipaddress.ip_network(c[2],strict=False)
-            if net.version!=v: raise ValueError(f'IPv{v}: wrong family')
-            cidrs.add(str(net))
-    if len(cidrs)<minimum: raise ValueError(f'IPv{v}: too few entries')
-    (p/f'cidr{v}').write_text('\n'.join(sorted(cidrs))+'\n')
-PY
+    SKIP6=0
+    asb_extract_feed "$WORK/source4" 4 "$WORK/cidr4"
+    rc=0
+    asb_extract_feed "$WORK/source6" 6 "$WORK/cidr6" || rc=$?
+    if (( rc == 3 )); then
+        SKIP6=1
+        log 'IPv6 AS feed explicitly empty: existing IPv6 set/rules preserved'
+    elif (( rc != 0 )); then exit "$rc"; fi
 else
     fetch https://www.spamhaus.org/drop/drop_v4.json "$WORK/spamhaus4"
     fetch https://www.spamhaus.org/drop/drop_v6.json "$WORK/spamhaus6"
@@ -273,6 +304,12 @@ fi
 
 for pair in "4 inet $STAGE4 $TARGET4" "6 inet6 $STAGE6 $TARGET6"; do
     read -r version family stage target <<< "$pair"
+    if [[ $version == 6 && $SKIP6 == 1 ]]; then continue; fi
+    # IPv6 can become available after an initially empty AS feed.
+    if ! ipset list "$target" >/dev/null 2>&1; then
+        [[ $MODE == as && $version == 6 ]] || exit 1
+        ipset create "$target" hash:net family "$family" maxelem 262144
+    fi
     ipset list "$target" >/dev/null
     ipset create "$stage" hash:net family "$family" maxelem 262144
     while IFS= read -r cidr; do ipset add "$stage" "$cidr" -exist; done < "$WORK/cidr$version"
@@ -287,15 +324,18 @@ cp -a /etc/ipset.conf "$WORK/ipset.conf.previous"
 
 ipset swap "$STAGE4" "$TARGET4"
 SWAP4=1
-ipset swap "$STAGE6" "$TARGET6"
-SWAP6=1
+if (( SKIP6 == 0 )); then
+    ipset swap "$STAGE6" "$TARGET6"
+    SWAP6=1
+fi
+/usr/local/sbin/firewall-blocklist-rules.sh
 
 # Persist only managed sets, never CrowdSec's dynamic ipsets.
 : > "$WORK/ipset.conf"
 for name in asn-blacklist-v4 asn-blacklist-v6 threat-block-v4 threat-block-v6; do
     if ipset list "$name" >/dev/null 2>&1; then ipset save "$name" >> "$WORK/ipset.conf"; fi
 done
-[[ $(grep -c '^create ' "$WORK/ipset.conf") -ge 2 ]]
+[[ $(grep -c '^create ' "$WORK/ipset.conf") -ge 1 ]]
 chmod 600 "$WORK/ipset.conf"
 # Same filesystem for atomic rename; keep the old file as a recovery copy.
 cp -a /etc/ipset.conf /etc/ipset.conf.pre-blocklist-update
@@ -305,9 +345,10 @@ mv -f "$PERSIST_TMP" /etc/ipset.conf
 
 COMMITTED=1
 ipset destroy "$STAGE4"
-ipset destroy "$STAGE6"
+if (( SKIP6 == 0 )); then ipset destroy "$STAGE6"; fi
 log 'OK: update completed'
 MANAGED_UPDATER
+    } > /usr/local/bin/firewall-blocklist-update.sh
     chmod 700 /usr/local/bin/firewall-blocklist-update.sh
     cat > /usr/local/sbin/fw-restore-safe.sh <<'SAFE_RESTORE'
 #!/usr/bin/env bash
@@ -7260,7 +7301,7 @@ asb_install_iptables() {
     fi
 
     # Зависимости
-    for pkg in ipset iptables; do
+    for pkg in ipset iptables python3; do
         if ! command -v "$pkg" >/dev/null; then
             apt-get -o DPkg::Lock::Timeout=600 install -y -qq --no-remove "$pkg" || {
                 rn_error "AS-списки: не удалось установить $pkg; правила не применяются."; return 1;
@@ -7295,34 +7336,30 @@ asb_install_iptables() {
         fi
     }
 
-    # Загрузка sets. Самый надёжный путь (как в рабочем threat-модуле): извлекаем
-    # CIDR из файла репо (строки "add blacklist-vN <cidr>") и грузим ipset add в цикле.
-    # НЕ swap (требует идентичных параметров → "type does not match" на v6),
-    # НЕ restore целиком. flush целевого совместим с активным правилом в iptables.
-    _asb_load() { # <suffix v4|v6>
-        local suf="$1" fam="inet" name stage cidr actual minimum=100
+    # Stage validated data before touching the live set. An explicitly empty
+    # upstream IPv6 feed is optional; never clear a previous set for it.
+    _asb_load() {
+        local suf="$1" fam="inet" name stage cidr actual parsed rc=0
         name="asn-blacklist-${suf}"
         stage="asbstage-${suf}-$$"
-        if [ "$suf" = "v6" ]; then fam="inet6"; minimum=5; fi
-        if [ ! -s "$ASB_DIR/blacklist-${suf}.ipset" ]; then
-            rn_warn "$suf: файл отсутствует или пуст"
-            return 1
-        fi
-
-        # Populate staging completely before changing any live firewall set.
-        ipset create "$stage" hash:net family "$fam" maxelem 262144 || return 1
+        [ "$suf" != v6 ] || fam="inet6"
+        parsed=$(mktemp) || return 1
+        asb_extract_feed "$ASB_DIR/blacklist-${suf}.ipset" "${suf#v}" "$parsed" || rc=$?
+        if (( rc != 0 )); then rm -f "$parsed"; return "$rc"; fi
+        ipset create "$stage" hash:net family "$fam" maxelem 262144 || { rm -f "$parsed"; return 1; }
         while IFS= read -r cidr; do
-            [ -n "$cidr" ] || continue
             if ! ipset add "$stage" "$cidr" -exist; then
-                rn_error "$suf: некорректная подсеть $cidr"
+                rm -f "$parsed"
                 ipset destroy "$stage" 2>/dev/null || true
                 return 1
             fi
-        done < <(awk '$1=="add" && $2=="blacklist-'"${suf}"'" {print $3}' "$ASB_DIR/blacklist-${suf}.ipset")
-
+        done < "$parsed"
+        local expected
+        expected=$(wc -l < "$parsed")
+        rm -f "$parsed"
         actual=$(ipset list "$stage" | awk '/^Number of entries:/ {print $4}')
-        if ! [[ "$actual" =~ ^[0-9]+$ ]] || (( actual < minimum )); then
-            rn_error "$suf: подозрительно короткий список ($actual)"
+        if ! [[ "$actual" =~ ^[0-9]+$ ]] || (( actual != expected )); then
+            rn_error "$suf: число подсетей IPSet не совпадает с проверенным фидом"
             ipset destroy "$stage" 2>/dev/null || true
             return 1
         fi
@@ -7345,8 +7382,17 @@ asb_install_iptables() {
         rn_error "IPv4 AS-список не применён."
         return 1
     fi
-    if ! _asb_load v6; then
-        rn_warn "IPv6 AS-список не обновлён; прежние правила сохранены."
+    local v6rc=0 v6ready=0
+    _asb_load v6 || v6rc=$?
+    if (( v6rc == 3 )); then
+        rn_warn "IPv6 AS-фид явно пуст у источника; существующий набор сохранён."
+    elif (( v6rc != 0 )); then
+        rn_warn "IPv6 AS-фид не прошёл проверку; существующий набор сохранён."
+    fi
+    if ipset list asn-blacklist-v6 >/dev/null 2>&1; then
+        local count6
+        count6=$(ipset list asn-blacklist-v6 | awk '/^Number of entries:/ {print $4}')
+        if [[ "$count6" =~ ^[0-9]+$ ]] && (( count6 > 0 )); then v6ready=1; fi
     fi
     # Проверка: сет реально создан и непуст, иначе нет смысла ставить правило
     if ! ipset list asn-blacklist-v4 &>/dev/null || \
@@ -7355,39 +7401,28 @@ asb_install_iptables() {
         log "AS_Network_List: FAIL — сет пуст"
         return 1
     fi
-    echo "  ✓ ipset sets загружены (asn-blacklist-v4 / asn-blacklist-v6)"
-
-    # Если активен Traffic-Guard — встраиваемся в SCANNERS-BLOCK (не трогаем INPUT)
-    if asb_detect_trafficguard; then
-        echo "  Traffic-Guard обнаружен — добавляю правила в цепочку SCANNERS-BLOCK"
-        if ! iptables -C SCANNERS-BLOCK -m set --match-set asn-blacklist-v4 src -j DROP 2>/dev/null; then
-            iptables -I SCANNERS-BLOCK 1 -m set --match-set asn-blacklist-v4 src -j DROP
-            echo "  ✓ IPv4 правило добавлено в SCANNERS-BLOCK"
-        else
-            echo "  ✓ IPv4 правило уже в SCANNERS-BLOCK"
+    echo "  ✓ IPv4 AS-набор загружен"
+    local cmd name chain=INPUT
+    if asb_detect_trafficguard; then chain=SCANNERS-BLOCK; fi
+    for cmd in iptables ip6tables; do
+        name=asn-blacklist-v4
+        if [[ $cmd == ip6tables ]]; then
+            if (( v6ready == 0 )); then
+                echo "  ℹ IPv6 AS DROP не добавляется: нет проверенных подсетей."
+                continue
+            fi
+            name=asn-blacklist-v6
         fi
-        if ! ip6tables -C SCANNERS-BLOCK -m set --match-set asn-blacklist-v6 src -j DROP 2>/dev/null; then
-            ip6tables -I SCANNERS-BLOCK 1 -m set --match-set asn-blacklist-v6 src -j DROP 2>/dev/null &&                 echo "  ✓ IPv6 правило добавлено в SCANNERS-BLOCK" || true
-        else
-            echo "  ✓ IPv6 правило уже в SCANNERS-BLOCK"
+        local -a rule=(-m set --match-set "$name" src)
+        if [[ $chain == INPUT ]]; then rule+=(-m conntrack --ctstate NEW); fi
+        rule+=(-j DROP)
+        if ! "$cmd" -C "$chain" "${rule[@]}" 2>/dev/null; then
+            "$cmd" -I "$chain" 1 "${rule[@]}" || { rn_error "Не удалось добавить $cmd AS DROP"; return 1; }
         fi
-        echo "iptables-tg" > "$ASB_DIR/mode"
-    else
-        # Стандартный INPUT
-        if ! iptables -C INPUT -m set --match-set asn-blacklist-v4 src -m conntrack --ctstate NEW -j DROP 2>/dev/null; then
-            iptables -I INPUT -m set --match-set asn-blacklist-v4 src -m conntrack --ctstate NEW -j DROP
-            echo "  ✓ IPv4 правило добавлено в INPUT"
-        else
-            echo "  ✓ IPv4 правило уже в INPUT"
-        fi
-        if ! ip6tables -C INPUT -m set --match-set asn-blacklist-v6 src -m conntrack --ctstate NEW -j DROP 2>/dev/null; then
-            ip6tables -I INPUT -m set --match-set asn-blacklist-v6 src -m conntrack --ctstate NEW -j DROP
-            echo "  ✓ IPv6 правило добавлено в INPUT"
-        else
-            echo "  ✓ IPv6 правило уже в INPUT"
-        fi
-        echo "iptables" > "$ASB_DIR/mode"
-    fi
+        "$cmd" -C "$chain" "${rule[@]}" || { rn_error "Не подтверждено $cmd AS DROP"; return 1; }
+        echo "  ✓ $cmd: AS DROP проверен в $chain"
+    done
+    if [[ $chain == INPUT ]]; then echo iptables > "$ASB_DIR/mode"; else echo iptables-tg > "$ASB_DIR/mode"; fi
 
     # КРИТИЧНО: вернуть lo ACCEPT на позицию 1 (наш -I INPUT мог сдвинуть его вниз).
     # Иначе DROP-правило окажется выше loopback → рвётся DNS через systemd-resolved.
@@ -7403,11 +7438,15 @@ asb_install_iptables() {
     v6count=$(ipset list asn-blacklist-v6 2>/dev/null | grep "Number of entries" | awk '{print $4}')
 
     echo ""
-    echo "✓ Установлено (iptables/ipset)"
+    echo "AS-списки: результат применения (iptables/ipset)"
     echo "  IPv4 подсетей: ${v4count}"
-    echo "  IPv6 подсетей: ${v6count}"
+    echo "  IPv6 подсетей: ${v6count:-0} (при пустом фиде IPv6 AS-защита не добавляется)"
     log "AS_Network_List (iptables) установлен. IPv4: ${v4count}, IPv6: ${v6count}"
 
+    if (( v6rc != 0 && v6rc != 3 )); then
+        rn_error "AS установлен частично: ошибка IPv6-фида; повторите только AS-списки."
+        return 1
+    fi
     # Самопроверка: правило реально в INPUT И сет непуст — иначе FAIL (для one-button)
     if iptables -C INPUT -m set --match-set asn-blacklist-v4 src -m conntrack --ctstate NEW -j DROP 2>/dev/null \
        && [ "${v4count:-0}" -gt 0 ] 2>/dev/null; then
