@@ -89,6 +89,9 @@ with tempfile.TemporaryDirectory() as temp:
         def __call__(self,args,cwd=None,timeout=60):
             if args[0]=='systemctl':return 'enabled\n' if 'is-enabled' in args else 'active\n'
             if args[0]=='certbot':
+                if args[1]=='renew':
+                    assert '--no-random-sleep-on-renew' in args
+                    assert '--dry-run' in args
                 if args[1]=='certonly':
                     token=Path('/var/www/letsencrypt/.well-known/acme-challenge/domain-ci-token')
                     token.write_text('challenge');token.chmod(0o644)

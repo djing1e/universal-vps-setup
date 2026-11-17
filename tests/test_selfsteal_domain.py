@@ -76,6 +76,27 @@ class DomainTests(unittest.TestCase):
         self.assertIn(' new.example.com ',(self.base/'hooks/new-domain.sh').read_text())
         self.assertFalse(any('up' in c or 'restart' in c or 'delete' in c for c in self.backend.calls))
         self.assertEqual(json.loads((obj.backup/'state.json').read_text())['state'],'complete')
+    def test_renewal_does_not_sleep_past_transaction_timeout(self):
+        obj=self.manager()
+        backend=self.backend
+        def certbot_with_random_sleep(args,cwd=None,timeout=60):
+            if args[:2]==['certbot','renew']:
+                # Certbot 4 selected 293 seconds on the affected node.
+                if '--no-random-sleep-on-renew' not in args:
+                    raise RuntimeError('random renewal sleep 293s exceeds 240s')
+                self.assertEqual(timeout,240)
+                self.assertIn('--dry-run',args)
+            return backend(args,cwd,timeout)
+        certbot_with_random_sleep.kind=backend.kind
+        certbot_with_random_sleep.calls=backend.calls
+        obj.run=certbot_with_random_sleep
+        self.assertEqual(obj.apply()['status'],'changed')
+        self.assertEqual(json.loads((obj.backup/'state.json').read_text())['state'],'complete')
+    def test_fresh_install_manual_renewal_disables_random_sleep(self):
+        source=(ROOT/'vps-setup.sh').read_text()
+        commands=[line for line in source.splitlines() if 'certbot renew' in line and '--dry-run' in line]
+        self.assertTrue(commands)
+        for line in commands:self.assertIn('--no-random-sleep-on-renew',line)
     def test_caddy_recreates_only_caddy_and_preserves_other_service(self):
         obj=self.manager('caddy');obj.apply()
         updated=json.loads((self.base/'docker-compose.yml').read_text())
