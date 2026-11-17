@@ -5534,7 +5534,9 @@ class Manager:
         write_mounted(self.conf_path, final)
         self.nginx_reload()
         self.wait_tls(self.new)
-        self.run(['certbot', 'renew', '--cert-name', self.new, '--dry-run', '--non-interactive'], timeout=240)
+        print('Проверяю продление сертификата без случайной задержки Certbot', flush=True)
+        self.run(['certbot', 'renew', '--cert-name', self.new, '--dry-run', '--non-interactive',
+                  '--no-random-sleep-on-renew'], timeout=240)
         self.hook = self.hook_path()
         self.hook.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
         secure(self.hook.parent, True)
@@ -5946,7 +5948,7 @@ rn_install_nginx_selfsteal() (
     --webroot-path /var/www/letsencrypt --non-interactive || return 1
   rn_nginx_create_hook || return 1
   systemctl enable --now certbot.timer || return 1
-  certbot renew --cert-name "$RN_DOMAIN" --dry-run --non-interactive || return 1
+  certbot renew --cert-name "$RN_DOMAIN" --dry-run --non-interactive --no-random-sleep-on-renew || return 1
   RENEWED_DOMAINS="$RN_DOMAIN" /etc/letsencrypt/renewal-hooks/deploy/reload-nginx-selfsteal.sh || return 1
   # Start the node only after TLS and automatic renewal have been verified.
   rn_compose up -d --no-deps remnanode || return 1

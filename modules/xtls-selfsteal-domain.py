@@ -316,7 +316,9 @@ class Manager:
         write_mounted(self.conf_path, final)
         self.nginx_reload()
         self.wait_tls(self.new)
-        self.run(['certbot', 'renew', '--cert-name', self.new, '--dry-run', '--non-interactive'], timeout=240)
+        print('Проверяю продление сертификата без случайной задержки Certbot', flush=True)
+        self.run(['certbot', 'renew', '--cert-name', self.new, '--dry-run', '--non-interactive',
+                  '--no-random-sleep-on-renew'], timeout=240)
         self.hook = self.hook_path()
         self.hook.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
         secure(self.hook.parent, True)
