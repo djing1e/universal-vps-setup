@@ -5498,6 +5498,10 @@ class Manager:
             for attempt in range(20):
                 connection = http.client.HTTPConnection('127.0.0.1', 80, timeout=3)
                 try:
+                    if re.search(r'listen\s+0\.0\.0\.0:80\s+proxy_protocol;', self.conf_original):
+                        connection.connect()
+                        # PROXY v2 LOCAL (no address payload) for the loopback probe.
+                        connection.sock.sendall(b'\r\n\r\n\x00\r\nQUIT\n\x20\x00\x00\x00')
                     connection.request('GET', '/.well-known/acme-challenge/' + token, headers={'Host': self.new})
                     response = connection.getresponse()
                     if response.status == 200 and response.read(4096).decode() == token:
@@ -5726,10 +5730,13 @@ setup_remnanode() {
 }
 
 rn_create_nginx_config() {
+  local listen_options="" config="${RN_INSTALL_DIR}/nginx-selfsteal/nginx.conf"
+  [[ -z "${RN_ENTRY_IP:-}" ]] || listen_options=" proxy_protocol"
+  if [[ "${1:-}" == bootstrap ]]; then config="${RN_INSTALL_DIR}/nginx-selfsteal/bootstrap.conf"; fi
   mkdir -p "${RN_INSTALL_DIR}/nginx-selfsteal" /var/www/letsencrypt/.well-known/acme-challenge || return 1
   # Root umask is 077. nginx workers need traverse permission on ACME dirs.
   chmod 755 /var/www/letsencrypt /var/www/letsencrypt/.well-known /var/www/letsencrypt/.well-known/acme-challenge || return 1
-  cat > "${RN_INSTALL_DIR}/nginx-selfsteal/nginx.conf" <<EOF || return 1
+  cat > "$config" <<EOF || return 1
 worker_processes auto;
 pid /tmp/nginx.pid;
 events { worker_connections 8192; }
@@ -5742,7 +5749,7 @@ http {
     tcp_nopush on;
     keepalive_timeout 65;
     server {
-        listen 0.0.0.0:80;
+        listen 0.0.0.0:80${listen_options};
         server_name ${RN_DOMAIN};
         location ^~ /.well-known/acme-challenge/ {
             root /var/www/letsencrypt;
@@ -5752,10 +5759,13 @@ http {
         location / { return 301 https://${RN_DOMAIN}\$request_uri; }
     }
     server {
-        listen 0.0.0.0:80 default_server;
+        listen 0.0.0.0:80 default_server${listen_options};
         server_name _;
         return 204;
     }
+EOF
+  if [[ "${1:-}" != bootstrap ]]; then
+    cat >> "$config" <<EOF || return 1
     server {
         listen unix:/dev/shm/nginx.sock ssl proxy_protocol;
         server_name ${RN_DOMAIN};
@@ -5769,9 +5779,10 @@ http {
         index index.html;
         location / { try_files \$uri \$uri/ /index.html; }
     }
-}
 EOF
-  chmod 600 "${RN_INSTALL_DIR}/nginx-selfsteal/nginx.conf"
+  fi
+  echo '}' >> "$config" || return 1
+  chmod 600 "$config"
 }
 
 rn_nginx_create_hook() {
@@ -5925,12 +5936,26 @@ rn_install_nginx_selfsteal() (
   cd "$RN_INSTALL_DIR" || return 1
   rn_compose config -q || return 1
   rn_compose pull || return 1
-  echo "Для HTTP-01 домен $RN_DOMAIN должен указывать на VPS, TCP 80 должен быть доступен извне."
-  # Port 80 is needed for issuance AND all subsequent renewals. No existing service is stopped.
-  if command -v ufw >/dev/null 2>&1; then ufw allow 80/tcp || return 1; fi
-  certbot certonly --standalone --preferred-challenges http \
-    --cert-name "$RN_DOMAIN" -d "$RN_DOMAIN" --non-interactive \
-    --agree-tos --register-unsafely-without-email || return 1
+  local cert_args=(--cert-name "$RN_DOMAIN" -d "$RN_DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email)
+  if [[ -n "${RN_ENTRY_IP:-}" ]]; then
+    if command -v ufw >/dev/null 2>&1; then
+      for port in 80 443; do ufw allow from "$RN_ENTRY_IP" to any port "$port" proto tcp || return 1; done
+    fi
+    rn_create_nginx_config bootstrap || return 1
+    (
+      set -e
+      local bootstrap_id
+      bootstrap_id=$(docker run -d --rm --network host --entrypoint nginx \
+        -v "$RN_INSTALL_DIR/nginx-selfsteal/bootstrap.conf:/etc/nginx/nginx.conf:ro" \
+        -v /var/www/letsencrypt:/var/www/letsencrypt:ro nginx:stable-alpine -g 'daemon off;') || exit 1
+      trap 'docker stop "$bootstrap_id" >/dev/null' EXIT
+      certbot certonly --webroot -w /var/www/letsencrypt "${cert_args[@]}" || exit 1
+    ) || return 1
+  else
+    echo "Для HTTP-01 домен $RN_DOMAIN должен указывать на VPS, TCP 80 должен быть доступен извне."
+    if command -v ufw >/dev/null 2>&1; then ufw allow 80/tcp || return 1; fi
+    certbot certonly --standalone --preferred-challenges http "${cert_args[@]}" || return 1
+  fi
   docker run --rm --network host --entrypoint nginx \
     -v "$RN_INSTALL_DIR/nginx-selfsteal/nginx.conf:/etc/nginx/nginx.conf:ro" \
     -v /etc/letsencrypt:/etc/letsencrypt:ro \
@@ -5944,8 +5969,10 @@ rn_install_nginx_selfsteal() (
     sleep 1
   done
   [[ "$ready" == true ]] || { rn_error "Nginx TLS/HTTP проверка не пройдена; Remnanode не запущен"; return 1; }
-  certbot reconfigure --cert-name "$RN_DOMAIN" --authenticator webroot \
+  if [[ -z "${RN_ENTRY_IP:-}" ]]; then
+    certbot reconfigure --cert-name "$RN_DOMAIN" --authenticator webroot \
     --webroot-path /var/www/letsencrypt --non-interactive || return 1
+  fi
   rn_nginx_create_hook || return 1
   systemctl enable --now certbot.timer || return 1
   certbot renew --cert-name "$RN_DOMAIN" --dry-run --non-interactive --no-random-sleep-on-renew || return 1
@@ -5957,12 +5984,15 @@ rn_install_nginx_selfsteal() (
   rn_setup_logrotate || return 1
   rn_open_panel_port || return 1
   rn_print_summary
+  if [[ -n "${RN_ENTRY_IP:-}" ]]; then
+    echo 'Панель Remnawave: для RAW inbound :443 укажите streamSettings.rawSettings.acceptProxyProtocol = true.'
+  fi
   echo "SelfSteal: Nginx; сертификаты: Certbot HTTP-01 + certbot.timer."
   echo "Xray Reality target: /dev/shm/nginx.sock, xver: 1 (PROXY protocol)."
 )
 
 setup_remnanode_builtin() {
-    local RN_WEB_SERVER
+    local RN_WEB_SERVER RN_ENTRY_IP=""
     echo "SelfSteal: выберите веб-сервер"
     echo "  1) Caddy 2 (Cloudflare DNS Challenge опционально)"
     echo "  2) Nginx + Certbot (HTTP-01, нужен доступный TCP 80)"
@@ -5975,6 +6005,14 @@ setup_remnanode_builtin() {
         rn_choose_install_dir || return 1
         rn_fresh_install_preflight || return 1
         rn_ask_params || return 1
+        echo "Прямое подключение — Enter. Для HAProxy send-proxy-v2 на 80 и 443 введите исходящий IPv4 entry."
+        read -rep "IPv4 HAProxy [Enter = напрямую]: " RN_ENTRY_IP || return 1
+        if [[ -n "$RN_ENTRY_IP" ]]; then
+          python3 -c 'import ipaddress, sys; ipaddress.IPv4Address(sys.argv[1])' "$RN_ENTRY_IP" 2>/dev/null ||
+            { rn_error "Некорректный IPv4 entry"; return 1; }
+          echo "DNS $RN_DOMAIN должен указывать на публичный вход entry. Ограничьте TCP 80/443 exit адресом $RN_ENTRY_IP в firewall провайдера."
+          echo "Проверьте ранее созданные общие ALLOW для этих портов. Переданный адрес клиента должен поступать только от доверенного HAProxy."
+        fi
         rn_install_nginx_selfsteal
         return $? ;;
       *) rn_error "Неверный выбор"; return 1 ;;

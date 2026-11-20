@@ -81,6 +81,20 @@ ufw() { :; }
         self.assertLess(calls.index('--dry-run'),calls.index('compose up -d --no-deps remnanode'))
         self.assertIn('oom',calls);self.assertIn('rotate',calls)
         self.assertNotIn('stop',calls);self.assertNotIn('down',calls)
+        self.env['RN_ENTRY_IP']='192.0.2.7'
+        (self.root/'calls').unlink()
+        r=self.run_shell('rn_install_nginx_selfsteal',stubs+'\nrn_nginx_preflight() { :; }')
+        self.assertEqual(r.returncode,0,r.stderr)
+        calls=(self.root/'calls').read_text()
+        self.assertIn('certbot certonly --webroot',calls)
+        self.assertNotIn('--standalone',calls)
+        self.assertNotIn('certbot reconfigure',calls)
+        self.assertLess(calls.index('docker stop'),calls.index('compose up -d --no-deps nginx'))
+        for file in ('bootstrap.conf','nginx.conf'):
+            conf=(self.install/'nginx-selfsteal'/file).read_text()
+            self.assertIn('listen 0.0.0.0:80 proxy_protocol;',conf)
+            self.assertIn('listen 0.0.0.0:80 default_server proxy_protocol;',conf)
+            self.assertEqual('ssl_certificate ' in conf,file=='nginx.conf')
     def test_certificate_failure_does_not_start_containers(self):
         r=self.run_shell('rn_install_nginx_selfsteal','''
 rn_install_deps() { :; }; apt-get() { :; }
@@ -94,7 +108,7 @@ certbot() { return 1; }; ufw() { :; }
     def test_menu_keeps_caddy_default_and_adds_nginx_choice(self):
         caddy=['rn_fresh_install_preflight','rn_choose_install_dir','rn_ask_params','rn_ask_cloudflare','rn_install_deps','rn_prepare_dirs','rn_create_stub','rn_create_dockerfile','rn_create_caddyfile','rn_create_compose','rn_setup_oom_watcher','rn_setup_logrotate','rn_open_panel_port','rn_start_services','rn_print_summary']
         stubs='\n'.join(n+'() { echo '+n+'; }' for n in caddy+['rn_install_nginx_selfsteal'])+'\nprint_header() { :; }\n'
-        for answer,expected,absent in [('\n','rn_create_caddyfile','rn_install_nginx_selfsteal'),('2\n','rn_install_nginx_selfsteal','rn_ask_cloudflare'),('0\n',None,'rn_choose_install_dir')]:
+        for answer,expected,absent in [('\n','rn_create_caddyfile','rn_install_nginx_selfsteal'),('2\n\n','rn_install_nginx_selfsteal','rn_ask_cloudflare'),('0\n',None,'rn_choose_install_dir')]:
             r=subprocess.run(['bash','-c',self.base+stubs+BUILTIN+'\nsetup_remnanode_builtin'],input=answer,text=True,capture_output=True)
             self.assertEqual(r.returncode,0,r.stderr)
             if expected:self.assertIn(expected,r.stdout)

@@ -280,6 +280,10 @@ class Manager:
             for attempt in range(20):
                 connection = http.client.HTTPConnection('127.0.0.1', 80, timeout=3)
                 try:
+                    if re.search(r'listen\s+0\.0\.0\.0:80\s+proxy_protocol;', self.conf_original):
+                        connection.connect()
+                        # PROXY v2 LOCAL (no address payload) for the loopback probe.
+                        connection.sock.sendall(b'\r\n\r\n\x00\r\nQUIT\n\x20\x00\x00\x00')
                     connection.request('GET', '/.well-known/acme-challenge/' + token, headers={'Host': self.new})
                     response = connection.getresponse()
                     if response.status == 200 and response.read(4096).decode() == token:
