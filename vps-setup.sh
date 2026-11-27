@@ -6861,6 +6861,709 @@ VPS_SETUP_HAPROXY_PAIR
 )
 }
 
+rn_run_caddy_nginx_migrator() {
+  bash -c "$(cat <<'VPS_SETUP_CADDY_NGINX_MIGRATOR'
+#!/usr/bin/env bash
+# xtlsproVPN SelfSteal Caddy -> Nginx migrator v6.3 (HAProxy aware, safe Caddy restart policy) (Remnanode, Docker host network)
+set -Eeuo pipefail
+umask 077
+
+BASE="${BASE:-/opt/remnanode}"
+STATE_DIR=/var/lib/xtlspro-selfsteal-migration
+BACKUP_ROOT=/var/backups/xtlspro-selfsteal-migration
+SOCKET=/dev/shm/nginx.sock
+NGINX_DIR="$BASE/nginx-selfsteal"
+NGINX_IMAGE="${NGINX_IMAGE:-nginx:stable-alpine}"
+MODE="${1:-check}"
+DOMAIN=''
+CADDY_CONTAINER=''
+CADDY_SERVICE=''
+BACKUP=''
+STARTED=0
+FINISHED=0
+STAGED_COMPOSE=""
+CADDY_RESTART_POLICY=""
+
+say() { printf '\n===== %s =====\n' "$*"; }
+die() { echo "ERROR: $*" >&2; exit 1; }
+warn() { echo "WARNING: $*" >&2; }
+need() { command -v "$1" >/dev/null || die "Required command not found: $1"; }
+# HAProxy helper runs on the entry host, independently of Docker/Remnanode.
+if [ "$MODE" = haproxy-check ] || [ "$MODE" = haproxy-fix ]; then
+  [ "$(id -u)" -eq 0 ] || die 'Run as root'
+  need python3; need haproxy; need systemctl
+  [ "$#" -eq 2 ] || die "Usage: $0 $MODE BACKEND_IPV4"
+  python3 - "$MODE" "$2" <<'PYHA'
+import sys, pathlib, ipaddress, re, subprocess, tempfile, shutil, os, datetime
+mode, ip = sys.argv[1:]
+ip = str(ipaddress.IPv4Address(ip))
+p = pathlib.Path('/etc/haproxy/haproxy.cfg')
+if p.is_symlink(): sys.exit('Refusing symlink configuration')
+old = p.read_text()
+section = None
+matches = {80: [], 443: []}
+lines = old.splitlines(keepends=True)
+for i, line in enumerate(lines):
+    words = line.split('#',1)[0].split()
+    if not words: continue
+    if words[0] in ('global','defaults','frontend','backend','listen','peers','resolvers','mailers','program','ring','cache','userlist','http-errors','fcgi-app','log-forward'):
+        section = words[:2]
+    if words[0] == 'default-server' and any(w in ('send-proxy','send-proxy-v2','send-proxy-v2-ssl','send-proxy-v2-ssl-cn') for w in words):
+        sys.exit('Inherited PROXY protocol detected; manual review required')
+    if section in (['backend','next_http'],['backend','next_reality']) and words[0] in ('server','server-template'):
+        port = 80 if section[1] == 'next_http' else 443
+        if words[0] != 'server' or len(words)<3 or words[2] != f'{ip}:{port}':
+            sys.exit('Unexpected backend server; manual review required')
+        matches[port].append((i,words))
+if any(len(v)!=1 for v in matches.values()): sys.exit('Expected exactly one server in each named backend')
+if 'send-proxy-v2' not in matches[443][0][1]: sys.exit('Reality backend does not use send-proxy-v2; manual review required')
+i, words = matches[80][0]
+flags = [w for w in words[3:] if w.startswith('send-proxy')]
+print('Reality:', ' '.join(matches[443][0][1]))
+print('HTTP:', ' '.join(words))
+if not flags:
+    print('HTTP backend already plain; no changes needed.')
+    sys.exit(0)
+if flags != ['send-proxy-v2']: sys.exit('Unexpected HTTP PROXY options; manual review required')
+if mode == 'haproxy-check': sys.exit('HTTP backend requires correction; run haproxy-fix with the same IP')
+subprocess.run(['systemctl','is-active','--quiet','haproxy'],check=True)
+lines[i] = re.sub(r'(?<!\S)send-proxy-v2(?=\s|$)', '', lines[i], count=1)
+new = ''.join(lines)
+fd, tmp = tempfile.mkstemp(prefix='.haproxy-xtls-',dir=p.parent); os.close(fd)
+t = pathlib.Path(tmp)
+try:
+    shutil.copy2(p,t); t.write_text(new); st=p.stat(); os.chown(t,st.st_uid,st.st_gid)
+    subprocess.run(['haproxy','-c','-f',str(t)],check=True)
+    backup = p.with_name(p.name+'.xtls-'+datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
+    shutil.copy2(p,backup); os.chown(backup,st.st_uid,st.st_gid)
+    if p.read_text()!=old: sys.exit('Configuration changed concurrently; refusing update')
+    os.replace(t,p)
+    try:
+        subprocess.run(['systemctl','reload','haproxy'],check=True)
+        subprocess.run(['systemctl','is-active','--quiet','haproxy'],check=True)
+    except BaseException:
+        shutil.copy2(backup,p)
+        subprocess.run(['systemctl','reload','haproxy'],check=True)
+        raise
+    print('HTTP backend corrected; Reality unchanged. Backup:',backup)
+finally:
+    t.unlink(missing_ok=True)
+PYHA
+  exit 0
+fi
+
+[ "$(id -u)" -eq 0 ] || die 'Run as root'
+need docker; need python3; need openssl; need curl; need ip
+[ -f "$BASE/docker-compose.yml" ] || die "Missing $BASE/docker-compose.yml"
+cd "$BASE"
+
+# Parse only the well-known Caddy service structure from the supplied deployment.
+parse_domain() {
+  DOMAIN="$(docker compose config --format json | python3 -c '
+import json,sys
+obj=json.load(sys.stdin)
+svc=sys.argv[1]
+services=obj.get("services",{})
+if svc not in services: sys.exit("Caddy service missing from normalized Compose configuration")
+env=services[svc].get("environment",{})
+if isinstance(env,list):
+    env=dict(item.split("=",1) for item in env if "=" in item)
+value=env.get("SELF_STEAL_DOMAIN", "")
+if not value: sys.exit("SELF_STEAL_DOMAIN not found for Caddy service")
+print(value)
+' "$CADDY_SERVICE")"
+  [[ "$DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]$ ]] || die "Invalid domain: $DOMAIN"
+}
+
+detect_caddy() {
+  # Only detect Caddy belonging to this exact Docker Compose working directory.
+  local entry id svc path image
+  CADDY_CONTAINER=''
+  CADDY_SERVICE=''
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    svc=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$id" 2>/dev/null || true)
+    path=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$id" 2>/dev/null || true)
+    image=$(docker inspect -f '{{.Config.Image}}' "$id" 2>/dev/null || true)
+    if [ "$path" = "$BASE" ] && [[ "$image" == caddy:* ]]; then
+      [ -z "$CADDY_CONTAINER" ] || die 'More than one Caddy container in this Compose project; manual inspection required'
+      CADDY_CONTAINER=$(docker inspect -f '{{.Name}}' "$id" | sed 's@^/@@')
+      CADDY_SERVICE="$svc"
+    fi
+  done < <(docker ps -aq)
+  [ -n "$CADDY_CONTAINER" ] || die "No Caddy container found in Compose project at $BASE"
+  [ -n "$CADDY_SERVICE" ] && [ "$CADDY_SERVICE" != '<no value>' ] || die 'Caddy Compose service label missing'
+  echo "Caddy: $CADDY_CONTAINER (service: $CADDY_SERVICE)"
+}
+
+preflight() {
+  say 'PRECHECK'
+  [ -f "$BASE/Caddyfile" ] || die 'Caddyfile absent'
+  if docker inspect nginx-selfsteal >/dev/null 2>&1; then
+    die 'nginx-selfsteal container already exists. Use fix-v5/status, not migrate.'
+  fi
+  [ -d /var/www/html ] || die '/var/www/html absent'
+  for dir in /var/www /var/www/html; do
+    [ -x "$dir" ] && [ $(( 8#$(stat -c %a "$dir") & 1 )) -eq 1 ] || die "SelfSteal directory not traversable by unprivileged Nginx: $dir (review permissions; chmod o+x if appropriate)"
+  done
+  [ -s /var/www/html/index.html ] || die 'Missing or empty index.html'
+  [ $(( 8#$(stat -c %a /var/www/html/index.html) & 4 )) -eq 4 ] || die 'index.html is not world-readable'
+  docker compose config -q
+  detect_caddy
+  docker inspect remnanode >/dev/null 2>&1 || die 'Container remnanode not found'
+  [ "$(docker inspect -f '{{.State.Running}}' "$CADDY_CONTAINER")" = true ] || die 'Caddy not running'
+  [ "$(docker inspect -f '{{.State.Running}}' remnanode)" = true ] || die 'Remnanode not running'
+  [ -S "$SOCKET" ] || die "Expected Unix socket missing: $SOCKET"
+  grep -Fq 'proxy_protocol' "$BASE/Caddyfile" || die 'Caddyfile lacks proxy_protocol; different topology'
+  grep -Fq 'unix/{$CADDY_SOCKET_PATH}' "$BASE/Caddyfile" || die 'Caddyfile does not use expected Unix socket'
+  docker inspect -f '{{range .Mounts}}{{println .Source .Destination}}{{end}}' remnanode | grep -Eq '^/dev/shm /dev/shm$' || die 'Remnanode does not mount shared /dev/shm'
+  [ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' remnanode)" = host ] || die 'Remnanode is not using host network'
+  [ "$CADDY_SERVICE" = caddy ] || die "This migrator expects Compose service 'caddy', got '$CADDY_SERVICE'"
+  [ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$CADDY_CONTAINER")" = host ] || die 'Caddy is not using host network mode'
+  parse_domain
+  echo "Domain: $DOMAIN"
+  echo "Working directory: $BASE"
+  echo "Caddy restart policy: $(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$CADDY_CONTAINER")"
+  echo "Socket: $SOCKET"
+  echo 'Remnanode will not be restarted.'
+  # Do not print compose: it may contain SECRET_KEY.
+  echo 'DNS IPv4:'; getent ahostsv4 "$DOMAIN" | awk '{print $1}' | sort -u || true
+  echo 'If the public domain points to HAProxy, keep that DNS record unchanged.'
+  echo 'HAProxy :443 backend must use send-proxy-v2 if Xray accepts it.'
+  echo 'HAProxy :80 backend must forward plain HTTP (without send-proxy-v2).'
+  echo 'Migration requires public HTTP-01 validation to reach this node on :80.'
+  say 'CURRENT CERTIFICATE'
+  certroot=$(docker volume inspect caddy_data -f '{{.Mountpoint}}' 2>/dev/null || true)
+  if [ -n "$certroot" ]; then
+    cert="$certroot/caddy/certificates/acme-v02.api.letsencrypt.org-directory/$DOMAIN/$DOMAIN.crt"
+    [ ! -f "$cert" ] || openssl x509 -in "$cert" -noout -subject -issuer -dates
+  fi
+  echo 'Preflight OK.'
+}
+
+write_nginx_config() {
+  mkdir -p "$NGINX_DIR" /var/www/letsencrypt/.well-known/acme-challenge
+  # Root umask is 077. nginx workers need traverse permission on ACME dirs.
+  chmod 755 /var/www/letsencrypt /var/www/letsencrypt/.well-known /var/www/letsencrypt/.well-known/acme-challenge
+  cat > "$NGINX_DIR/nginx.conf" <<EOF
+worker_processes auto;
+pid /tmp/nginx.pid;
+events { worker_connections 8192; }
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    server_tokens off;
+    sendfile on;
+    tcp_nopush on;
+    keepalive_timeout 65;
+    server {
+        listen 0.0.0.0:80;
+        server_name $DOMAIN;
+        location ^~ /.well-known/acme-challenge/ {
+            root /var/www/letsencrypt;
+            default_type text/plain;
+            try_files \$uri =404;
+        }
+        location / { return 301 https://$DOMAIN\$request_uri; }
+    }
+    server {
+        listen 0.0.0.0:80 default_server;
+        server_name _;
+        return 204;
+    }
+    server {
+        listen unix:$SOCKET ssl proxy_protocol;
+        server_name $DOMAIN;
+        ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_session_cache shared:SSL:10m;
+        ssl_session_timeout 1d;
+        http2 on;
+        root /var/www/html;
+        index index.html;
+        location / { try_files \$uri \$uri/ /index.html; }
+    }
+}
+EOF
+  chmod 600 "$NGINX_DIR/nginx.conf"
+}
+
+# Construct a candidate Compose file without touching the live deployment.
+# JSON-in-.yml is a valid Docker Compose format; preserve it. For YAML use
+# the same tested narrow service replacement as v6, but validate in advance.
+stage_compose() {
+  local original="$BASE/docker-compose.yml"
+  STAGED_COMPOSE=$(mktemp "$BASE/.xtlspro-compose-stage.XXXXXX.yml")
+  chmod 600 "$STAGED_COMPOSE"
+  python3 - "$original" "$STAGED_COMPOSE" "$NGINX_IMAGE" "$CADDY_SERVICE" <<'PYTHON'
+import json, pathlib, re, sys
+p=pathlib.Path(sys.argv[1]); out=pathlib.Path(sys.argv[2]); img=sys.argv[3]; service=sys.argv[4]
+s=p.read_text()
+nginx={
+ 'image':img,'container_name':'nginx-selfsteal','hostname':'nginx-selfsteal',
+ 'restart':'always','network_mode':'host',
+ 'ulimits':{'nofile':{'soft':1048576,'hard':1048576}},
+ 'logging':{'driver':'json-file','options':{'max-size':'25m','max-file':'3'}},
+ 'volumes':['./nginx-selfsteal/nginx.conf:/etc/nginx/nginx.conf:ro',
+ '/etc/letsencrypt:/etc/letsencrypt:ro','/var/www/html:/var/www/html:ro',
+ '/var/www/letsencrypt:/var/www/letsencrypt:ro','/dev/shm:/dev/shm:rw'],
+ 'healthcheck':{'test':['CMD-SHELL','test -S /dev/shm/nginx.sock && nginx -t'],
+ 'interval':'10s','timeout':'5s','retries':3,'start_period':'5s'}}
+try:
+    obj=json.loads(s)
+except json.JSONDecodeError:
+    obj=None
+if obj is not None:
+    if not isinstance(obj,dict) or not isinstance(obj.get('services'),dict):
+        sys.exit('Invalid Compose JSON: services object missing')
+    if service not in obj['services']: sys.exit('Caddy service not found in Compose JSON')
+    if 'nginx' in obj['services']: sys.exit('Nginx service already exists')
+    # Keep all unrelated keys and service definitions exactly as parsed.
+    del obj['services'][service]
+    obj['services']['nginx']=nginx
+    out.write_text(json.dumps(obj,ensure_ascii=False,indent=2)+'\n')
+else:
+    root=re.search(r'(?m)^services:\s*(?:#.*)?$',s)
+    if not root: sys.exit('Unsupported Compose format: services section not found')
+    tail=s[root.end():]
+    roots=list(re.finditer(r'(?m)^[A-Za-z_][\w-]*:\s*(?:#.*)?$',tail))
+    section_end=root.end()+(roots[0].start() if roots else len(tail))
+    section=s[root.end():section_end]
+    items=list(re.finditer(r'(?m)^( +)([A-Za-z_][\w-]*):\s*(?:#.*)?$',section))
+    if not items: sys.exit('No services found or unsupported YAML formatting')
+    minindent=min(len(x.group(1)) for x in items)
+    items=[x for x in items if len(x.group(1))==minindent]
+    candidates=[i for i,x in enumerate(items) if x.group(2)==service]
+    if len(candidates)!=1: sys.exit('Cannot safely identify exactly one Caddy service')
+    if any(x.group(2)=='nginx' for x in items): sys.exit('Nginx service already exists')
+    i=candidates[0]; start=root.end()+items[i].start()
+    end=root.end()+(items[i+1].start() if i+1<len(items) else len(section))
+    indent=' '*minindent; child=' '*(minindent+2)
+    new=f'''{indent}nginx:
+{child}image: {img}
+{child}container_name: nginx-selfsteal
+{child}hostname: nginx-selfsteal
+{child}restart: always
+{child}network_mode: host
+{child}ulimits:
+{child}  nofile:
+{child}    soft: 1048576
+{child}    hard: 1048576
+{child}logging:
+{child}  driver: json-file
+{child}  options:
+{child}    max-size: '25m'
+{child}    max-file: '3'
+{child}volumes:
+{child}  - ./nginx-selfsteal/nginx.conf:/etc/nginx/nginx.conf:ro
+{child}  - /etc/letsencrypt:/etc/letsencrypt:ro
+{child}  - /var/www/html:/var/www/html:ro
+{child}  - /var/www/letsencrypt:/var/www/letsencrypt:ro
+{child}  - /dev/shm:/dev/shm:rw
+{child}healthcheck:
+{child}  test: ["CMD-SHELL", "test -S /dev/shm/nginx.sock && nginx -t"]
+{child}  interval: 10s
+{child}  timeout: 5s
+{child}  retries: 3
+{child}  start_period: 5s
+
+'''
+    out.write_text(s[:start]+new+s[end:])
+PYTHON
+  # This validation happens BEFORE Caddy is stopped.
+  docker compose -f "$STAGED_COMPOSE" config -q
+  local services
+  services=$(docker compose -f "$STAGED_COMPOSE" config --services)
+  grep -qx 'nginx' <<< "$services" || die 'Staged Compose lacks nginx'
+  grep -qx 'remnanode' <<< "$services" || die 'Staged Compose lost remnanode'
+  if grep -qx "$CADDY_SERVICE" <<< "$services"; then die 'Staged Compose still contains Caddy'; fi
+  echo 'Staged Compose: validated (original untouched).'
+}
+
+# TLS over a HAProxy frontend cannot reveal whether its HTTP backend injects
+# PROXY v2: the old Caddy accepts it, but Certbot standalone does not.
+# Require explicit acknowledgement before beginning disruptive migration.
+public_http_precheck() {
+  local require_confirmation="${1:-1}"
+  say 'PUBLIC DNS / HTTP-01 PREFLIGHT'
+  local dns_ips local_ips target httpcode rc remote=0 answer
+  dns_ips=$(getent ahostsv4 "$DOMAIN" | awk '{print $1}' | sort -u || true)
+  [ -n "$dns_ips" ] || die "No public IPv4 DNS address for $DOMAIN"
+  local_ips=$(ip -4 -o addr show | awk '{split($4,a,"/");print a[1]}' | sort -u)
+  echo "Domain: $DOMAIN; DNS IPv4: $(echo "$dns_ips" | tr '\n' ' ')"
+  for target in $dns_ips; do
+    if ! grep -qxF "$target" <<< "$local_ips"; then remote=1; fi
+  done
+  if [ "$remote" = 1 ]; then
+    warn 'External DNS address detected (HAProxy/CDN/NAT). Verify the actual ingress topology.'
+    echo "On HAProxy: vps-setup -> Caddy / Nginx migration -> HAProxy check"
+    echo "If needed: choose HAProxy HTTP backend correction in the same menu"
+    if [ "${HAPROXY_HTTP_PLAIN_CONFIRMED:-0}" != 1 ]; then
+      if [ "$require_confirmation" = 1 ]; then
+        if [ -t 0 ]; then
+          read -r -p 'Verified HAProxy HTTP/80 is plain on all paths? Type YES: ' answer
+          [ "$answer" = YES ] || die 'HTTP backend not confirmed'
+          HAPROXY_HTTP_PLAIN_CONFIRMED=1
+        else
+          die 'Verify HTTP backend and set HAPROXY_HTTP_PLAIN_CONFIRMED=1'
+        fi
+      else
+        warn 'Plain HTTP backend confirmation required before migrate.'
+      fi
+    fi
+  fi
+  for target in $dns_ips; do
+    rc=0
+    httpcode=$(curl -4 --noproxy '*' --connect-timeout 5 --max-time 12 --max-redirs 0       --resolve "$DOMAIN:80:$target" -sS -o /dev/null -w '%{http_code}' "http://$DOMAIN/") || rc=$?
+    case "$httpcode" in 200|204|301|302|307|308|404) [ "$rc" = 0 ] && { echo "HTTP route reachable: $target HTTP=$httpcode"; continue; } ;; esac
+    if [ "$remote" = 1 ] && [ "$httpcode" = 000 ] && [[ "$rc" =~ ^(7|28)$ ]]; then
+      warn "HTTP unreachable from this VPS: $target (curl=$rc)"
+      if [ "$require_confirmation" = 0 ]; then warn 'External test required before migrate'; continue; fi
+      if [ "${HAPROXY_EXTERNAL_HTTP_CONFIRMED:-0}" != 1 ] && [ -t 0 ]; then
+        read -r -p 'Independently verified public HTTP on ALL DNS addresses? Type YES: ' answer
+        [ "$answer" != YES ] || HAPROXY_EXTERNAL_HTTP_CONFIRMED=1
+      fi
+      [ "${HAPROXY_HTTP_PLAIN_CONFIRMED:-0}" = 1 ] && [ "${HAPROXY_EXTERNAL_HTTP_CONFIRMED:-0}" = 1 ] || die 'External HAProxy HTTP not confirmed'
+      warn 'External HAProxy override; live ACME verification remains mandatory.'
+    else
+      die "Unexpected HTTP response: $target HTTP=$httpcode curl=$rc"
+    fi
+  done
+  HAPROXY_REMOTE="$remote"
+}
+
+create_hook() {
+  local hook=/etc/letsencrypt/renewal-hooks/deploy/reload-nginx-selfsteal.sh
+  mkdir -p "$(dirname "$hook")"
+  cat > "$hook" <<'EOF'
+#!/bin/sh
+set -eu
+if [ -n "${RENEWED_DOMAINS:-}" ]; then
+  case " ${RENEWED_DOMAINS} " in *" fr.xtls.win "*) : ;; *) exit 0 ;; esac
+fi
+if docker inspect -f '{{.State.Running}}' nginx-selfsteal 2>/dev/null | grep -qx true; then
+  docker exec nginx-selfsteal nginx -s reload
+fi
+EOF
+  # Replace the placeholder with the actual target domain, safely.
+  HOOK_DOMAIN="$DOMAIN" python3 - "$hook" <<'PY'
+import os,pathlib,sys
+p=pathlib.Path(sys.argv[1]);p.write_text(p.read_text().replace('fr.xtls.win',os.environ['HOOK_DOMAIN']))
+PY
+  chmod 755 "$hook"
+}
+
+unix_tls_test() {
+  DOMAIN="$DOMAIN" python3 - <<'PY'
+import os, socket, ssl
+name=os.environ['DOMAIN']
+s=socket.socket(socket.AF_UNIX)
+s.settimeout(10)
+s.connect('/dev/shm/nginx.sock')
+s.sendall(b'PROXY TCP4 127.0.0.2 127.0.0.1 12345 443\r\n')
+ctx=ssl.create_default_context()
+with ctx.wrap_socket(s, server_hostname=name) as tls:
+    tls.sendall((f'GET / HTTP/1.1\r\nHost: {name}\r\nConnection: close\r\n\r\n').encode())
+    head=tls.recv(4096)
+    if not head.startswith(b'HTTP/1.1 200'):
+        raise SystemExit('SelfSteal unexpected HTTP status: '+repr(head[:100]))
+    print('TLS:',tls.version(), ' HTTP: 200 OK')
+PY
+}
+
+# Preserve the runtime restart policy, not just the Compose file. Legacy Caddy
+# containers remain outside the rewritten Compose and would otherwise restart
+# on reboot, deleting Nginx's Unix socket (confirmed on KZ node).
+remember_caddy_policy() {
+  CADDY_RESTART_POLICY="$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$CADDY_CONTAINER")"
+  [ -n "$CADDY_RESTART_POLICY" ] || CADDY_RESTART_POLICY=no
+  printf '%s\n' "$CADDY_RESTART_POLICY" > "$BACKUP/caddy-restart-policy"
+}
+
+# On a v5 migration there may be no saved policy. Read the old Compose backup
+# rather than assuming every deployment used restart: always.
+backup_caddy_policy() {
+  local b="$1" policy
+  if [ -f "$b/caddy-restart-policy" ]; then
+    policy=$(cat "$b/caddy-restart-policy")
+  else
+    policy=$(docker compose -f "$b/docker-compose.yml" config --format json | python3 -c '
+import json,sys
+obj=json.load(sys.stdin)
+print(obj.get("services",{}).get(sys.argv[1],{}).get("restart","no"))
+' "$CADDY_SERVICE")
+  fi
+  case "$policy" in always|unless-stopped|no|on-failure) printf '%s\n' "$policy" ;; *) die "Unsupported saved Caddy restart policy: $policy" ;; esac
+}
+
+wait_for_nginx() {
+  local i health
+  for i in $(seq 1 15); do
+    health=$(docker inspect nginx-selfsteal --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' 2>/dev/null || true)
+    if [ "$health" = healthy ]; then return 0; fi
+    sleep 2
+  done
+  die "Nginx failed to become healthy (last state: $health)"
+}
+
+# Repair v5 nodes in place without touching Remnanode or rewriting Compose.
+repair_v5() {
+  say 'REPAIR LEGACY CADDY AUTO-RESTART (v5 -> v6)'
+  detect_caddy
+  [ "$(docker inspect -f '{{.State.Running}}' nginx-selfsteal 2>/dev/null || true)" = true ] || die 'Nginx is not running: refusing to stop Caddy'
+  [ -f "$NGINX_DIR/nginx.conf" ] || die "Missing $NGINX_DIR/nginx.conf"
+  DOMAIN=$(sed -nE 's/^[[:space:]]*server_name[[:space:]]+([a-zA-Z0-9.-]+);[[:space:]]*$/\1/p' "$NGINX_DIR/nginx.conf" | head -n 1)
+  [ -n "$DOMAIN" ] || die 'Cannot find SelfSteal domain in Nginx config'
+  if [ -f "$STATE_DIR/latest-backup" ]; then
+    BACKUP=$(cat "$STATE_DIR/latest-backup")
+    if [ -f "$BACKUP/docker-compose.yml" ] && [ ! -f "$BACKUP/caddy-restart-policy" ]; then
+      # A v5 installation has lost its runtime Caddy policy; derive it from
+      # old Compose which is authoritative on next fresh deployment.
+      backup_caddy_policy "$BACKUP" > "$BACKUP/caddy-restart-policy"
+    fi
+  fi
+  echo "Domain: $DOMAIN"
+  echo "Legacy Caddy: $CADDY_CONTAINER"
+  docker update --restart=no "$CADDY_CONTAINER"
+  if [ "$(docker inspect -f '{{.State.Running}}' "$CADDY_CONTAINER")" = true ]; then
+    echo 'Stopping legacy Caddy to prevent socket collision.'
+    docker stop "$CADDY_CONTAINER"
+  fi
+  # Never unlink a socket while nginx is running: that was the KZ outage.
+  if [ ! -S "$SOCKET" ]; then
+    warn 'Nginx Unix socket is absent; restarting ONLY nginx-selfsteal to recreate it.'
+    docker restart nginx-selfsteal
+  fi
+  wait_for_nginx
+  [ -S "$SOCKET" ] || die 'Nginx healthy but Unix socket missing'
+  unix_tls_test
+  echo "Legacy Caddy restart policy: $(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$CADDY_CONTAINER")"
+  echo 'SUCCESS: v5 autostart conflict repaired; Remnanode untouched.'
+}
+
+restore() {
+  local b="$1" policy
+  [ -f "$b/docker-compose.yml" ] || die "Backup missing: $b"
+  policy=$(backup_caddy_policy "$b")
+  say 'ROLLBACK TO CADDY'
+  # Remove our dedicated container entirely. This also prevents its restart
+  # policy from unexpectedly reviving Nginx on the next Docker daemon restart.
+  if docker inspect nginx-selfsteal >/dev/null 2>&1; then
+    docker update --restart=no nginx-selfsteal >/dev/null 2>&1 || true
+    docker stop nginx-selfsteal >/dev/null 2>&1 || true
+    docker rm nginx-selfsteal >/dev/null 2>&1 || true
+  fi
+  cp -a "$b/docker-compose.yml" "$BASE/docker-compose.yml"
+  [ ! -f "$b/Caddyfile" ] || cp -a "$b/Caddyfile" "$BASE/Caddyfile"
+  docker compose config -q
+  # Nginx is stopped and removed; it is safe to clean up its socket now.
+  rm -f "$SOCKET"
+  if docker inspect "$CADDY_CONTAINER" >/dev/null 2>&1; then
+    docker update --restart="$policy" "$CADDY_CONTAINER" >/dev/null
+    docker start "$CADDY_CONTAINER"
+  else
+    docker compose up -d --no-deps "$CADDY_SERVICE"
+    docker update --restart="$policy" "$(docker compose ps -q "$CADDY_SERVICE")"
+  fi
+  echo "Caddy restored (restart=$policy). Remnanode was not touched."
+}
+
+on_exit() {
+  local ec=$?
+  trap - EXIT
+  if [ -n "$STAGED_COMPOSE" ]; then rm -f "$STAGED_COMPOSE"; fi
+  if [ "$STARTED" -eq 1 ] && [ "$FINISHED" -eq 0 ]; then
+    echo "Migration failed or interrupted (exit $ec). Restoring Caddy..." >&2
+    restore "$BACKUP" || warn 'AUTOMATIC ROLLBACK FAILED: inspect containers and backup manually'
+  fi
+  exit "$ec"
+}
+
+trap on_exit EXIT
+case "$MODE" in
+  check)
+    preflight
+    stage_compose
+    public_http_precheck 0
+    rm -f "$STAGED_COMPOSE"
+    STAGED_COMPOSE=''
+    echo 'Read-only precheck complete; public HAProxy HTTP mode is not auto-verifiable.'
+    ;;
+  migrate)
+    preflight
+    say 'INSTALL DEPENDENCIES'
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y certbot
+    need certbot
+    say 'PULL NGINX IMAGE'
+    docker pull "$NGINX_IMAGE"
+    say 'VALIDATE FUTURE COMPOSE BEFORE DOWNTIME'
+    stage_compose
+    public_http_precheck
+    say 'CREATE BACKUP'
+    mkdir -p "$BACKUP_ROOT" "$STATE_DIR"
+    BACKUP="$BACKUP_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-$(hostname -s)"
+    mkdir -m 700 "$BACKUP"
+    cp -a "$BASE/docker-compose.yml" "$BASE/Caddyfile" "$BACKUP/"
+    printf '%s\n' "$BACKUP" > "$STATE_DIR/latest-backup"
+    echo "Backup: $BACKUP"
+    remember_caddy_policy
+    write_nginx_config
+    # Start rollback protection immediately before changing the running service.
+    STARTED=1
+    trap on_exit EXIT
+    say 'DISABLE CADDY AUTOSTART AND STOP (BEGIN SHORT DOWNTIME)'
+    docker update --restart=no "$CADDY_CONTAINER"
+    docker stop "$CADDY_CONTAINER"
+    say 'CERTBOT CERTIFICATE'
+    if [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ] && [ -f "/etc/letsencrypt/live/$DOMAIN/privkey.pem" ]; then
+      echo 'Existing Certbot certificate found, reusing it.'
+      openssl x509 -in "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" -noout -checkend 604800 || die 'Existing Certbot certificate expires within 7 days'
+    else
+      certbot certonly --standalone --preferred-challenges http \
+        --cert-name "$DOMAIN" -d "$DOMAIN" --non-interactive \
+        --agree-tos --register-unsafely-without-email
+    fi
+    say 'UPDATE NGINX AND COMPOSE'
+    cp -a "$STAGED_COMPOSE" "$BASE/docker-compose.yml"
+    rm -f "$STAGED_COMPOSE"
+    STAGED_COMPOSE=''
+    docker compose config -q
+    docker run --rm --network host --entrypoint nginx \
+      -v "$NGINX_DIR/nginx.conf:/etc/nginx/nginx.conf:ro" \
+      -v /etc/letsencrypt:/etc/letsencrypt:ro \
+      -v /var/www/html:/var/www/html:ro \
+      -v /var/www/letsencrypt:/var/www/letsencrypt:ro \
+      -v /dev/shm:/dev/shm:rw "$NGINX_IMAGE" -t
+    rm -f "$SOCKET"
+    say 'START NGINX (REMNANODE IS UNCHANGED)'
+    docker compose up -d --no-deps nginx
+    docker exec nginx-selfsteal nginx -t
+    wait_for_nginx
+    unix_tls_test
+    say 'TEST HTTP-01 WEBROOT'
+    # Confirm public traverse permissions; actual HTTP check follows.
+    docker exec nginx-selfsteal sh -c 'test -x /var/www/letsencrypt && test -x /var/www/letsencrypt/.well-known && test -x /var/www/letsencrypt/.well-known/acme-challenge'
+    token="xtlspro-$(date +%s)-$$"
+    # The script uses umask 077, so explicitly grant nginx worker read access.
+    token_file="/var/www/letsencrypt/.well-known/acme-challenge/$token"
+    printf '%s' "$token" > "$token_file"
+    chmod 644 "$token_file"
+    if ! received=$(curl --noproxy '*' -fsS --max-time 10 -H "Host: $DOMAIN" "http://127.0.0.1/.well-known/acme-challenge/$token"); then
+      rm -f "/var/www/letsencrypt/.well-known/acme-challenge/$token"
+      die 'HTTP-01 webroot test failed: HTTP response was not 200'
+    fi
+    [ "$received" = "$token" ] || die 'HTTP-01 webroot test failed: token content differs'
+    # Verify the public route; only connection failures may be overridden.
+    rc=0
+    received=$(curl -4 --noproxy '*' --connect-timeout 5 --max-time 20 --max-redirs 0         -fsS "http://$DOMAIN/.well-known/acme-challenge/$token") || rc=$?
+    rm -f "$token_file"
+    if [ "$rc" = 0 ]; then
+      [ "$received" = "$token" ] || die 'Public HTTP-01 token content differs'
+    elif [ "${HAPROXY_REMOTE:-0}" = 1 ] && [ "${HAPROXY_HTTP_PLAIN_CONFIRMED:-0}" = 1 ] && [ "${HAPROXY_EXTERNAL_HTTP_CONFIRMED:-0}" = 1 ] && [[ "$rc" =~ ^(7|28)$ ]]; then
+      warn 'Public token unreachable from this VPS; ACME dry-run is mandatory.'
+    else
+      die 'Public HTTP-01 challenge cannot be retrieved through DNS/HAProxy'
+    fi
+    say 'CONFIGURE CERTBOT WEBROOT'
+    certbot reconfigure --cert-name "$DOMAIN" --authenticator webroot \
+      --webroot-path /var/www/letsencrypt --non-interactive
+    create_hook
+    systemctl enable --now certbot.timer
+    say 'DRY RUN RENEWAL'
+    certbot renew --cert-name "$DOMAIN" --dry-run --non-interactive
+    say 'TEST RELOAD HOOK'
+    RENEWED_DOMAINS="$DOMAIN" RENEWED_LINEAGE="/etc/letsencrypt/live/$DOMAIN" \
+      /etc/letsencrypt/renewal-hooks/deploy/reload-nginx-selfsteal.sh
+    say 'STATUS'
+    docker inspect nginx-selfsteal -f '{{.State.Status}} / {{if .State.Health}}{{.State.Health.Status}}{{end}}'
+    systemctl is-active certbot.timer
+    docker ps --format 'table {{.Names}}\t{{.Status}}'
+    [ "$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$CADDY_CONTAINER")" = no ] || die 'Legacy Caddy restart policy is not disabled'
+    [ "$(docker inspect -f '{{.State.Running}}' "$CADDY_CONTAINER")" = false ] || die 'Legacy Caddy still running'
+    FINISHED=1
+    echo "SUCCESS: $DOMAIN now uses Nginx. Rollback: choose Rollback to Caddy in the migration menu."
+    echo "Old stopped Caddy container and caddy_data volume are deliberately preserved."
+    ;;
+  fix-v5|repair)
+    repair_v5
+    ;;
+  rollback)
+    [ -f "$STATE_DIR/latest-backup" ] || die 'No migration backup pointer found'
+    BACKUP=$(cat "$STATE_DIR/latest-backup")
+    detect_caddy
+    restore "$BACKUP"
+    ;;
+  status)
+    docker ps -a --format 'table {{.Names}}\t{{.Status}}'
+    echo "Unix socket: $([ -S "$SOCKET" ] && echo present || echo missing)"
+    for c in caddy-remnawave caddy-remnanode; do
+      if docker inspect "$c" >/dev/null 2>&1; then
+        docker inspect "$c" -f 'Legacy {{.Name}} restart={{.HostConfig.RestartPolicy.Name}} running={{.State.Running}}'
+      fi
+    done
+    systemctl is-active certbot.timer || true
+    [ ! -f "$STATE_DIR/latest-backup" ] || echo "Backup: $(cat "$STATE_DIR/latest-backup")"
+    ;;
+  *)
+    echo "Usage: $0 {check|migrate|fix-v5|status|rollback|haproxy-check BACKEND_IPV4|haproxy-fix BACKEND_IPV4}" >&2
+    exit 2
+    ;;
+esac
+VPS_SETUP_CADDY_NGINX_MIGRATOR
+)" vps-setup-caddy-nginx "$@"
+}
+
+rn_caddy_nginx_menu() {
+  local choice mode backend answer rc
+  while true; do
+    print_header
+    echo "=== Замена Caddy на Nginx SelfSteal (v6.3) ==="
+    echo ""
+    echo "  1) Предварительная проверка"
+    echo "  2) Миграция Caddy → Nginx"
+    echo "  3) Исправить автозапуск старого Caddy (v5)"
+    echo "  4) Статус"
+    echo "  5) Откат на Caddy"
+    echo "  6) HAProxy: проверка HTTP backend (на ENTRY)"
+    echo "  7) HAProxy: исправить HTTP backend (на ENTRY)"
+    echo "  0) Назад"
+    read -e -r -p "Выберите [0-7]: " choice || return 0
+    case "$choice" in
+      1) mode=check ;;
+      2) mode=migrate ;;
+      3) mode=fix-v5 ;;
+      4) mode=status ;;
+      5) mode=rollback ;;
+      6) mode=haproxy-check ;;
+      7) mode=haproxy-fix ;;
+      0) return 0 ;;
+      *) continue ;;
+    esac
+
+    local -a args=("$mode")
+    if [[ "$mode" == haproxy-* ]]; then
+      read -e -r -p "IPv4 backend (0 — назад): " backend || return 0
+      [[ -n "$backend" && "$backend" != 0 ]] || continue
+      args+=("$backend")
+    fi
+    case "$mode" in
+      migrate|fix-v5|rollback|haproxy-fix)
+        read -e -r -p "Выполнить $mode? Введите yes: " answer || return 0
+        [[ "$answer" == yes ]] || continue
+        ;;
+    esac
+    rc=0
+    rn_run_caddy_nginx_migrator "${args[@]}" || rc=$?
+    if (( rc != 0 )); then
+      echo "Действие завершилось с кодом $rc. Проверьте сообщения выше."
+    fi
+    echo ""
+    read -e -r -p "Нажмите Enter для возврата..." || return 0
+  done
+}
+
 setup_remnanode() {
   while true; do
     print_header
@@ -6888,9 +7591,10 @@ setup_remnanode() {
     echo ""
     echo "  6) Сменить домен SelfSteal (Caddy / Nginx)"
     echo "  7) HAProxy Pair — настройка ENTRY / RELAY / EXIT"
+    echo "  8) Замена Caddy на Nginx SelfSteal (миграция v6.3)"
     echo "  0) Назад"
     echo ""
-    read -e -p "Выберите [0-7]: " RN_METHOD
+    read -e -p "Выберите [0-8]: " RN_METHOD
 
     case $RN_METHOD in
         1) setup_remnanode_builtin ;;
@@ -6900,6 +7604,7 @@ setup_remnanode() {
         5) setup_tbsync ;;
         6) rn_change_selfsteal_domain ;;
         7) rn_haproxy_pair ;;
+        8) rn_caddy_nginx_menu ;;
         0) return ;;
         *) echo "Неверный выбор." ;;
     esac
