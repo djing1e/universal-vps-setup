@@ -5683,6 +5683,1184 @@ setup_node_config() {
 }
 
 
+rn_haproxy_pair() {
+  bash <(cat <<'VPS_SETUP_HAPROXY_PAIR'
+#!/bin/bash
+# ╔════════════════════════════════════════════════════════════════════╗
+# ║  haproxy-pair-setup.sh — входная нода на haproxy + Reality за ней  ║
+# ╠════════════════════════════════════════════════════════════════════╣
+# ║  Схема 1:  клиент → ENTRY (haproxy) → EXIT (xray Reality) → сеть    ║
+# ║  Схема 2:  клиент → ENTRY (haproxy) → RELAY (xray Reality,          ║
+# ║            ру-трафик DIRECT) → bridge-ha → EXIT (мост 9998) → сеть  ║
+# ║  Схема 3:  клиент → ENTRY (haproxy) → gost mux/mTLS → EXIT → сеть   ║
+# ║            одна ENTRY может вести на несколько EXIT (по SNI)        ║
+# ╚════════════════════════════════════════════════════════════════════╝
+# Запуск на КАЖДОЙ машине цепочки: bash haproxy-pair-setup.sh (от root).
+# Порядок: сначала дальняя нода (EXIT / RELAY), потом ENTRY.
+# Повторный запуск безопасен.
+
+set -u
+RED='\033[0;31m'; GRN='\033[0;32m'; YEL='\033[1;33m'; CYN='\033[0;36m'; BLD='\033[1m'; RST='\033[0m'
+ok()   { echo -e "${GRN}[OK]${RST}   $*"; }
+info() { echo -e "${CYN}[INFO]${RST} $*"; }
+warn() { echo -e "${YEL}[WARN]${RST} $*"; }
+die()  { echo -e "${RED}[ERR]${RST}  $*"; exit 1; }
+hr()   { echo -e "${BLD}══════════════════════════════════════════════════════════════${RST}"; }
+
+[ "$(id -u)" = 0 ] || die "Запускать от root (sudo -i)"
+
+GOST_VER="3.3.3"
+GOST_BIN=/usr/local/bin/gost
+GOST_DIR=/etc/gost
+# mux v2 — проверено в проде; v1 давал массовые sD
+MUX="mux.version=2&mux.maxReceiveBuffer=4194304&mux.maxStreamBuffer=1048576&mux.keepaliveInterval=10s"
+TUN_PORT=8443          # порт gost-сервера на EXIT
+# Перезапуск gost против утечки памяти/сокетов: EXIT в :30, ENTRY через 3 минуты (UTC)
+RESTART_HOURS="01,07,13,19"
+
+# ══════════════════════════════════════════════════════════════════════
+#   Общие функции
+# ══════════════════════════════════════════════════════════════════════
+valid_ip()   { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
+is_own_ip()  { ip -4 -o addr show | grep -q " $1/"; }
+show_ips()   { ip -4 -o addr show | awk '$2!="lo" && $2!~/^docker|^br-|^veth/ {print "    "$2": "$4}'; }
+pub_ip()     { curl -4 -s --max-time 5 https://ifconfig.me 2>/dev/null; }
+is_private() {   # RFC1918 + CGNAT (NetBird/Tailscale)
+    [[ "$1" =~ ^10\. || "$1" =~ ^192\.168\. || "$1" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. \
+       || "$1" =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\. ]]
+}
+
+ask_ip() {   # <подпись> <переменная> — адрес ДРУГОЙ машины
+    local label="$1" var="$2" v
+    while true; do
+        read -rep "  $label: " v
+        valid_ip "$v" || { warn "Некорректный IP"; continue; }
+        is_own_ip "$v" && { warn "Это адрес ЭТОЙ машины — нужен адрес другой машины"; continue; }
+        break
+    done
+    printf -v "$var" '%s' "$v"
+}
+
+ask_own_ip() {   # <подпись> <переменная> <можно пусто: 1|0> — адрес ЭТОЙ машины
+    local label="$1" var="$2" empty="${3:-0}" v
+    while true; do
+        read -rep "  $label: " v
+        [ -z "$v" ] && [ "$empty" = 1 ] && break
+        valid_ip "$v" || { warn "Некорректный IP"; continue; }
+        is_own_ip "$v" || { warn "$v не найден на интерфейсах этой машины"; continue; }
+        break
+    done
+    printf -v "$var" '%s' "$v"
+}
+
+ask_ip_list() {   # <подпись> <переменная> — один или несколько IP через пробел
+    local label="$1" var="$2" v x good
+    while true; do
+        read -rep "  $label: " v
+        good=1; [ -z "$v" ] && good=0
+        for x in $v; do
+            valid_ip "$x" || { warn "Некорректный IP: $x"; good=0; continue; }
+            is_own_ip "$x" && { warn "$x — адрес ЭТОЙ машины"; good=0; }
+        done
+        [ "$good" = 1 ] && break
+    done
+    printf -v "$var" '%s' "$v"
+}
+
+ask_ssh() {   # → SSH_PORT, SSH_ALLOW
+    read -rep "  SSH-порт этой машины [Enter = 62152]: " SSH_PORT
+    SSH_PORT="${SSH_PORT:-62152}"
+    [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || die "Порт должен быть числом"
+    echo "  С каких IP пускать SSH? Через пробел, или Enter — со всех."
+    read -rep "  SSH allow: " SSH_ALLOW
+    local x; for x in $SSH_ALLOW; do valid_ip "$x" || die "Некорректный IP в SSH allow: $x"; done
+}
+
+ask_panel() {   # → PANEL_IP
+    echo "  IP панели Remnawave — откуда она ходит на API ноды (2222)."
+    echo "  Точный адрес: docker logs remnanode | grep 'Attempt to start XTLS' → (IP: ...)"
+    ask_ip "IP панели" PANEL_IP
+}
+
+confirm() {
+    echo ""; echo -e "  ${BLD}Итог:${RST}"; echo -e "$1" | sed 's/^/    /'
+    read -rep "  Продолжить? [Y/n]: " a
+    [[ "${a,,}" == n* ]] && exit 0
+}
+
+# TCP-проверка: различает «открыт», «отказ» (порт закрыт, но связь есть) и «таймаут»
+tcp_probe() {   # <ip> <port> [<src ip>] → open|refused|timeout
+    local out rc
+    if [ -n "${3:-}" ] && command -v python3 >/dev/null 2>&1; then
+        python3 -c '
+import socket, sys
+s = socket.socket(); s.settimeout(5)
+try:
+    s.bind((sys.argv[3], 0)); s.connect((sys.argv[1], int(sys.argv[2]))); print("open")
+except ConnectionRefusedError: print("refused")
+except Exception: print("timeout")
+' "$1" "$2" "$3"
+        return
+    fi
+    out=$(timeout 5 bash -c "exec 3<>/dev/tcp/$1/$2" 2>&1); rc=$?
+    if   [ $rc -eq 0 ];   then echo open
+    elif [ $rc -eq 124 ]; then echo timeout
+    elif echo "$out" | grep -qi refused; then echo refused
+    else echo timeout
+    fi
+}
+
+report_probe() {   # <ip> <port> <ждём: open|reach> <пояснение> [<src ip>]
+    local r; r=$(tcp_probe "$1" "$2" "${5:-}")
+    case "$r:$3" in
+        open:*)        ok   "$1:$2 — открыт ($4)" ;;
+        refused:reach) ok   "$1:$2 — связь есть, порт пока не слушается ($4)" ;;
+        refused:open)  warn "$1:$2 — связь есть, но порт не слушается ($4)" ;;
+        timeout:*)     warn "$1:$2 — ТАЙМАУТ ($4): фаервол на той стороне, провайдер/ТСПУ или маршрут" ;;
+    esac
+}
+
+# ── Лимиты ядра: порты, очереди, conntrack, файлы, буферы ───────────
+# Префикс zz — файл применяется последним и не перебивается другими.
+# Буферы TCP — максимум 16 МБ: с 64 МБ gost/haproxy съедали гигабайты памяти ядра.
+apply_sysctl() {
+    modprobe nf_conntrack 2>/dev/null
+    cat > /etc/sysctl.d/zz-haproxy-chain.conf << 'EOF'
+# haproxy-pair-setup: все соединения трубы идут с одного IP на один IP:порт
+net.ipv4.ip_local_port_range = 1024 65535
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 65535
+net.core.netdev_max_backlog = 16384
+net.netfilter.nf_conntrack_max = 1048576
+net.netfilter.nf_conntrack_tcp_timeout_established = 7200
+fs.file-max = 2097152
+fs.nr_open = 2097152
+# буферы: не больше 16 МБ на сокет
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 131072 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+EOF
+    sysctl --system >/dev/null 2>&1
+    local pr; pr=$(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null | tr -s '\t ' ' ')
+    ok "sysctl: порты $pr, somaxconn $(sysctl -n net.core.somaxconn), буферы ≤16 МБ, conntrack_max $(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo '-')"
+}
+
+fix_vpsguard() {   # <peer ip> — только для приватного соседа (bogon-фильтр режет лишь приватные)
+    local vg=/etc/vpsguard/vpsguard.nft net="${1%.*}.0/24"
+    [ -f "$vg" ] || return 0
+    is_private "$1" || return 0
+    if grep -qE 'set fleet_v4 \{ type ipv4_addr; flags interval; auto-merge; \}' "$vg"; then
+        sed -i "s|set fleet_v4 { type ipv4_addr; flags interval; auto-merge; }|set fleet_v4 { type ipv4_addr; flags interval; auto-merge; elements = { $net } }|" "$vg"
+        nft -c -f "$vg" >/dev/null 2>&1 || { warn "vpsguard: ошибка в $vg — проверь вручную"; return 0; }
+        if systemctl list-unit-files 2>/dev/null | grep -q '^vpsguard-firewall'; then
+            systemctl restart vpsguard-firewall
+        else
+            nft -f "$vg" 2>/dev/null
+        fi
+        ok "vpsguard: $net в fleet_v4"
+    else
+        ok "vpsguard: fleet_v4 уже заполнен"
+    fi
+}
+
+vpsguard_warn_limits() {   # на принимающей стороне трубы per-IP лимиты задушат её
+    nft list table inet vpsguard >/dev/null 2>&1 || return 0
+    warn "vpsguard активен: его per-IP лимиты на 443 (2048 соединений / 200 SYN/с)"
+    echo "       посчитают всю трубу одним клиентом и начнут резать её под нагрузкой."
+    echo "       Добавь IP ENTRY в fleet_v4 (/etc/vpsguard/vpsguard.nft) или отключи vpsguard."
+}
+
+ufw_base() {   # SSH — всегда первым, до enable
+    command -v ufw >/dev/null 2>&1 || { apt-get update -qq; apt-get install -y -qq ufw >/dev/null; }
+    local ip
+    if [ -z "$SSH_ALLOW" ]; then
+        ufw allow "$SSH_PORT/tcp" >/dev/null
+    else
+        for ip in $SSH_ALLOW; do
+            ufw allow from "$ip" to any port "$SSH_PORT" proto tcp comment 'ssh' >/dev/null
+        done
+    fi
+}
+
+ufw_close_public() {   # снять публичные (Anywhere) правила: <порт> ...
+    local p r
+    for p in "$@"; do
+        for r in "$p" "$p/tcp"; do ufw delete allow "$r" >/dev/null 2>&1; done
+    done
+}
+
+ufw_finish() {
+    ufw --force enable >/dev/null
+    ok "ufw включён"
+    ufw status | sed 's/^/       /'
+}
+
+# ── Закрепление IP выше блоклистов ──────────────────────────────────
+# fw-restore / threat-blacklist-update вставляют DROP по ipset в INPUT 1,
+# а /etc/iptables/rules.v4 при загрузке не применяется. Поэтому список
+# «своих» IP держим в файле и поднимаем наверх: при старте, после каждого
+# обновления блоклистов и раз в 10 минут.
+PIN_LIST=/etc/pin-rules.list
+install_pin_rules() {
+    [ -x /usr/local/sbin/pin-rules.sh ] && [ -f /etc/systemd/system/pin-rules.timer ] && return 0
+    cat > /usr/local/sbin/pin-rules.sh << 'EOF'
+#!/bin/bash
+# Поднимает ACCEPT для IP из /etc/pin-rules.list на верх INPUT (выше DROP блоклистов)
+L=/etc/pin-rules.list
+[ -f "$L" ] || exit 0
+grep -vE '^\s*(#|$)' "$L" | awk '{print $1}' | tac | while read -r ip; do
+    while iptables -C INPUT -s "$ip" -j ACCEPT 2>/dev/null; do
+        iptables -D INPUT -s "$ip" -j ACCEPT
+    done
+    iptables -I INPUT 1 -s "$ip" -j ACCEPT
+done
+EOF
+    chmod 755 /usr/local/sbin/pin-rules.sh
+    cat > /etc/systemd/system/pin-rules.service << 'EOF'
+[Unit]
+Description=Pin trusted IPs above ipset blocklists
+After=network-online.target ufw.service ipset-persistent.service fw-restore.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/pin-rules.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    cat > /etc/systemd/system/pin-rules.timer << 'EOF'
+[Unit]
+Description=Re-pin trusted IPs every 10 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target
+EOF
+    if systemctl list-unit-files 2>/dev/null | grep -q '^threat-blacklist-update.service'; then
+        mkdir -p /etc/systemd/system/threat-blacklist-update.service.d
+        printf '[Service]\nExecStartPost=-/usr/local/sbin/pin-rules.sh\n' \
+            > /etc/systemd/system/threat-blacklist-update.service.d/pin-rules.conf
+    fi
+    systemctl daemon-reload
+    systemctl enable pin-rules.service pin-rules.timer >/dev/null 2>&1
+    systemctl start pin-rules.timer
+}
+
+pin_ip() {   # <ip> <комментарий> — пропустить IP выше блоклистов, переживает ребут
+    install_pin_rules
+    touch "$PIN_LIST"
+    grep -qE "^$1(\s|$)" "$PIN_LIST" || echo "$1  # $2" >> "$PIN_LIST"
+    /usr/local/sbin/pin-rules.sh
+    ok "$1 ($2) — закреплён выше блоклистов"
+}
+
+check_listen() {   # <порт> <что>
+    if ss -tlnp | grep -q ":$1 "; then ok "$1 слушается ($2)"; else warn "$1 никто не слушает ($2)"; fi
+}
+
+# ── Исходящий IP на втором интерфейсе ───────────────────────────────
+# Если исходящий к EU адрес висит не на интерфейсе маршрута по умолчанию,
+# ответы уйдут не тем путём. Добавляем source-routing: from <ip> → table 100.
+setup_src_route() {   # <src ip>
+    local src="$1" dev defdev gw tbl=100
+    dev=$(ip -4 -o addr show | awk -v ip="$src" '{split($4,a,"/"); if (a[1]==ip) print $2}' | head -1)
+    defdev=$(ip route show default | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
+    [ -z "$dev" ] && { warn "$src не найден на интерфейсах"; return 1; }
+    if [ "$dev" = "$defdev" ]; then ok "$src на $dev — основной интерфейс, отдельный маршрут не нужен"; return 0; fi
+    if ip rule show | grep -q "from $src "; then ok "source-routing для $src уже есть"; return 0; fi
+    echo "  $src висит на $dev, а маршрут по умолчанию через $defdev."
+    echo "  Нужен шлюз подсети $dev (у провайдера; обычно .1 подсети)."
+    gw=$(ip route show dev "$dev" | awk '/via/{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}' | head -1)
+    read -rep "  Шлюз для $dev${gw:+ [Enter = $gw]}: " a; gw="${a:-$gw}"
+    valid_ip "$gw" || { warn "Шлюз не задан — source-routing не настроен"; return 1; }
+    cat > "/etc/systemd/system/src-route-${dev}.service" << EOF
+[Unit]
+Description=Source routing for $src via $dev
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/ip route replace default via $gw dev $dev table $tbl
+ExecStart=-/sbin/ip rule del from $src table $tbl
+ExecStart=/sbin/ip rule add from $src table $tbl priority 100
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    sysctl -w "net.ipv4.conf.$dev.rp_filter=2" >/dev/null
+    grep -q "conf.$dev.rp_filter" /etc/sysctl.d/zz-haproxy-chain.conf 2>/dev/null \
+        || echo "net.ipv4.conf.$dev.rp_filter = 2" >> /etc/sysctl.d/zz-haproxy-chain.conf
+    systemctl daemon-reload
+    systemctl enable --now "src-route-${dev}.service" >/dev/null 2>&1 \
+        && ok "source-routing: from $src → table $tbl → $gw ($dev)" \
+        || warn "src-route-${dev} не поднялся: journalctl -u src-route-${dev}"
+}
+
+# ── gost ────────────────────────────────────────────────────────────
+install_gost() {
+    if [ -x "$GOST_BIN" ] && "$GOST_BIN" -V 2>/dev/null | grep -q "$GOST_VER"; then
+        ok "gost $GOST_VER уже стоит"; return 0
+    fi
+    local arch url tmp
+    case "$(uname -m)" in
+        x86_64)  arch=amd64 ;;
+        aarch64) arch=arm64 ;;
+        *) die "Неизвестная архитектура $(uname -m)" ;;
+    esac
+    url="https://github.com/go-gost/gost/releases/download/v${GOST_VER}/gost_${GOST_VER}_linux_${arch}.tar.gz"
+    tmp=$(mktemp -d)
+    info "Качаю gost $GOST_VER..."
+    if curl -fsSL --max-time 60 "$url" -o "$tmp/g.tgz" && tar -xzf "$tmp/g.tgz" -C "$tmp" gost; then
+        install -m 755 "$tmp/gost" "$GOST_BIN"
+        rm -rf "$tmp"
+        ok "gost: $("$GOST_BIN" -V 2>&1 | head -1)"
+    else
+        rm -rf "$tmp"
+        die "GitHub недоступен. Скачай $url на другой машине, положи бинарник в $GOST_BIN и запусти снова."
+    fi
+}
+
+drop_old_cron() {   # старый cron-перезапуск заменён systemd-таймером
+    if [ -f /etc/cron.d/gost-restart ]; then
+        mv /etc/cron.d/gost-restart "/root/gost-restart.cron.bak.$(date +%s)"
+        info "Старый /etc/cron.d/gost-restart убран (копия в /root) — теперь systemd-таймер"
+    fi
+}
+
+install_restart_timer() {   # <имя> <минута> <glob юнитов>
+    cat > "/etc/systemd/system/$1.service" << EOF
+[Unit]
+Description=Restart gost units ($3) against memory/socket leak
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl restart $3
+EOF
+    cat > "/etc/systemd/system/$1.timer" << EOF
+[Unit]
+Description=Restart gost every 6h
+
+[Timer]
+OnCalendar=*-*-* ${RESTART_HOURS}:$2:00 UTC
+Persistent=false
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now "$1.timer" >/dev/null 2>&1
+    ok "Перезапуск gost: каждые 6 ч ($RESTART_HOURS:$2 UTC) — systemctl list-timers $1.timer"
+}
+
+# ══════════════════════════════════════════════════════════════════════
+#   ENTRY — haproxy, сюда подключаются клиенты (схемы 1 и 2)
+# ══════════════════════════════════════════════════════════════════════
+install_haproxy() {
+    info "Ставлю haproxy..."
+    command -v haproxy >/dev/null 2>&1 || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq haproxy >/dev/null; } \
+        || die "Не удалось установить haproxy"
+    haproxy -v | head -1 | sed 's/^/       /'
+    # maxconn 100000 ≈ 200000 сокетов — поднимаем лимит файлов процесса
+    mkdir -p /etc/systemd/system/haproxy.service.d
+    printf '[Service]\nLimitNOFILE=1048576\n' > /etc/systemd/system/haproxy.service.d/limits.conf
+    systemctl daemon-reload
+}
+
+haproxy_head() {   # общие global/defaults
+    cat << 'EOF'
+global
+    log /dev/log local0
+    maxconn 100000
+
+defaults
+    mode tcp
+    log global
+    option tcplog
+    option dontlog-normal
+    option tcpka
+    timeout connect    5s
+    timeout client     5m
+    timeout server     5m
+    timeout tunnel     1h
+    timeout client-fin 30s
+    timeout server-fin 30s
+
+EOF
+}
+
+haproxy_apply() {   # <файл нового конфига> <bind ip или *>
+    haproxy -c -f "$1" >/dev/null 2>&1 || { haproxy -c -f "$1"; die "Ошибка в конфиге haproxy ($1)"; }
+    [ -f /etc/haproxy/haproxy.cfg ] && cp /etc/haproxy/haproxy.cfg "/etc/haproxy/haproxy.cfg.bak.$(date +%s)"
+    install -m 644 "$1" /etc/haproxy/haproxy.cfg
+    systemctl enable haproxy >/dev/null 2>&1
+    systemctl restart haproxy   # restart, а не reload: reload оставляет старый процесс с соединениями
+    sleep 1
+    if ss -tlnp | grep -E "[:.]443 " | grep -q haproxy; then
+        ok "haproxy слушает ${2}:443 и ${2}:80"
+    else
+        ss -tlnp | grep -E ':(443|80) ' | sed 's/^/       /'
+        die "haproxy не слушает 443 — порт занят другим процессом?"
+    fi
+}
+
+setup_entry() {
+    local scheme="$1" next
+    [ "$scheme" = 1 ] && next="EXIT" || next="RELAY"
+
+    echo -e "\n${BLD}═══ ENTRY (haproxy) → $next ═══${RST}\n"
+    echo "  Адреса ЭТОЙ машины:"; show_ips; echo ""
+    echo "  Адрес $next: приватный (если в одной сети) или публичный."
+    ask_ip "IP $next" UP_IP
+    read -rep "  Порт Reality на $next [Enter = 443]: " UP_PORT; UP_PORT="${UP_PORT:-443}"
+    read -rep "  Порт для ACME на $next [Enter = 80]: " UP_HTTP; UP_HTTP="${UP_HTTP:-80}"
+    echo "  На $next selfsteal на nginx (ждёт PROXY v2 и на 80) или на Caddy (на 80 — без него)?"
+    read -rep "  nginx на $next? [y/N]: " a; local acme_pp=""; [[ "${a,,}" == y* ]] && acme_pp=" send-proxy-v2"
+    echo "  Адрес для клиентов: один IP этой машины или Enter — все адреса."
+    ask_own_ip "Bind IP" BIND_IP 1
+    echo "  Старые SNI, которые отбивать на входе (через пробел, Enter — нет)."
+    echo "  НЕ указывай текущий домен selfsteal — отрежешь всех клиентов."
+    read -rep "  Отбивать SNI: " OLD_SNI
+    ask_ssh
+    confirm "схема $scheme: ENTRY ${BIND_IP:-*}:443 → $next $UP_IP:$UP_PORT (ACME → :$UP_HTTP${acme_pp:+, PROXY v2})\nотбивать SNI: ${OLD_SNI:-нет}\nSSH $SSH_PORT (${SSH_ALLOW:-Anywhere})"
+
+    install_haproxy
+    local b="${BIND_IP:-*}" cfg; cfg=$(mktemp)
+    {
+        haproxy_head
+        echo "frontend reality_in"
+        echo "    bind ${b}:443"
+        if [ -n "$OLD_SNI" ]; then
+            echo "    tcp-request inspect-delay 5s"
+            echo "    tcp-request content reject if { req.ssl_sni -i ${OLD_SNI} }"
+            echo "    tcp-request content accept if { req.ssl_hello_type 1 }"
+        fi
+        echo "    default_backend next_reality"
+        echo ""
+        echo "backend next_reality"
+        echo "    server next ${UP_IP}:${UP_PORT} send-proxy-v2"
+        echo ""
+        echo "frontend http_in"
+        echo "    bind ${b}:80"
+        echo "    default_backend next_http"
+        echo ""
+        echo "backend next_http"
+        echo "    server next ${UP_IP}:${UP_HTTP}${acme_pp}"
+        echo ""
+    } > "$cfg"
+    haproxy_apply "$cfg" "$b"; rm -f "$cfg"
+
+    apply_sysctl
+    fix_vpsguard "$UP_IP"
+
+    info "Настраиваю ufw..."
+    ufw_base
+    ufw allow 443/tcp >/dev/null
+    ufw allow 80/tcp  >/dev/null
+    ufw_close_public 2222 9998
+    ufw_finish
+
+    echo ""
+    info "Маршрут и связь до $next:"
+    ip route get "$UP_IP" | head -1 | sed 's/^/       /'
+    report_probe "$UP_IP" "$UP_PORT" reach "Reality"
+    report_probe "$UP_IP" "$UP_HTTP" reach "ACME"
+
+    entry_footer "${BIND_IP:-$(pub_ip)}"
+}
+
+entry_footer() {   # <клиентский IP>
+    echo ""; hr
+    echo "  ENTRY готова."
+    echo "   • DNS selfsteal-домена(ов) → $1"
+    echo "   • Хост в панели: address = $1, порт 443, SNI = домен selfsteal"
+    echo "   • tbsync (роль BS) и шейпер — на ЭТОЙ машине: только тут видны IP клиентов."
+    echo "     Whitelist tbsync оставь пустым (скрипт предлагает твой SSH-IP — сотри)"
+    echo "   • Проверка снаружи: curl -sv https://ДОМЕН -o /dev/null 2>&1 | grep -E 'subject|HTTP/'"
+    echo "   • Логи: journalctl -u haproxy -f (пишутся только ошибки: dontlog-normal)"
+    echo "     SD — обрыв со стороны сервера (плохо), sD/cD — простой 5 мин (норма)"
+    hr
+}
+
+# ══════════════════════════════════════════════════════════════════════
+#   Reality-нода за haproxy: EXIT (схема 1) или RELAY (схема 2)
+# ══════════════════════════════════════════════════════════════════════
+setup_reality_node() {
+    local scheme="$1" role
+    [ "$scheme" = 1 ] && role="EXIT" || role="RELAY"
+
+    echo -e "\n${BLD}═══ $role (Reality за haproxy) ═══${RST}\n"
+    echo "  Remnanode + Caddy/nginx ставятся отдельно (vps-setup.sh → 10 → 1)."
+    echo ""
+    echo "  Адреса ЭТОЙ машины:"; show_ips; echo ""
+    echo "  IP, с которого придёт haproxy ENTRY (её исходящий адрес; несколько — через пробел)."
+    ask_ip_list "IP ENTRY" ENTRY_IPS
+    ask_panel
+    ask_ssh
+    confirm "схема $scheme, роль $role\nentry $ENTRY_IPS, панель $PANEL_IP\nSSH $SSH_PORT (${SSH_ALLOW:-Anywhere})"
+
+    apply_sysctl
+    local ip
+    for ip in $ENTRY_IPS; do fix_vpsguard "$ip"; done
+    vpsguard_warn_limits
+
+    info "Настраиваю ufw..."
+    ufw_base
+    for ip in $ENTRY_IPS; do
+        ufw allow from "$ip" to any port 443 proto tcp comment 'entry-haproxy' >/dev/null
+        ufw allow from "$ip" to any port 80  proto tcp comment 'entry-acme'    >/dev/null
+    done
+    ufw allow from "$PANEL_IP" to any port 2222 proto tcp comment 'panel' >/dev/null
+    ufw_close_public 443 80 2222
+    ufw_finish
+
+    pin_ip "$PANEL_IP" panel
+    for ip in $ENTRY_IPS; do pin_ip "$ip" entry; done
+
+    echo ""
+    info "Состояние сервисов:"
+    check_listen 443  "xray"
+    check_listen 2222 "API ноды"
+    check_listen 80   "Caddy/nginx"
+
+    [ "$scheme" = 2 ] && setup_bridge_ha
+
+    reality_footer "$role" "$ENTRY_IPS"
+    [ "$scheme" = 2 ] && echo "   • Routing: ру-трафик → DIRECT, последним правилом inbound → VLESS_TO_EU"
+    hr
+}
+
+reality_footer() {   # <роль> <ip, которые видит плагин вместо клиентов>
+    local pub; pub=$(pub_ip)
+    echo ""; hr
+    echo "  $1 готова. Проверь в панели:"
+    echo "   • Нода: address = ПУБЛИЧНЫЙ IP этой машины${pub:+ ($pub)}, порт 2222"
+    echo "   • Inbound на 443 включён на ноде и подключён к скваду с юзерами"
+    echo '   • В inbound:  "rawSettings": { "acceptProxyProtocol": true }'
+    echo '                 "realitySettings": { "xver": 1, "target": "/dev/shm/nginx.sock", ... }'
+    echo '                 "sniffing": { "enabled": true, "routeOnly": true, ... }'
+    echo "   • Torrent Blocker: ignoreLists.ip ← $2"
+    echo "     Бан на этой машине не сработает (пакеты идут с ENTRY) — нужен tbsync:"
+    echo "     vps-setup.sh → 10 → 5 → relay здесь, BS — на ENTRY"
+    echo "   • Снаружи (не с ENTRY): nc -zv ${pub:-IP} 443 → должен быть timeout"
+}
+
+# ══════════════════════════════════════════════════════════════════════
+#   bridge-ha на RELAY: failover RELAY → EXIT
+# ══════════════════════════════════════════════════════════════════════
+setup_bridge_ha() {
+    echo ""
+    echo -e "${BLD}── bridge-ha: failover RELAY → EXIT ──${RST}"
+    echo "  haproxy на 127.0.0.1:10001: outbound VLESS_TO_EU в xray ходит в него,"
+    echo "  он — на основной EXIT, при падении — на запасной."
+    read -rep "  Настроить bridge-ha? [Y/n]: " a
+    [[ "${a,,}" == n* ]] && return 0
+
+    command -v docker >/dev/null 2>&1 || { warn "Docker не найден — сначала поставь remnanode, потом меню → 4 → 1"; return 0; }
+
+    local main_ip main_port bk_ip="" bk_port=""
+    ask_ip "Основной EXIT — IP" main_ip
+    read -rep "  Порт моста на основном [Enter = 9998]: " main_port; main_port="${main_port:-9998}"
+    read -rep "  Запасной EXIT — IP (Enter — без запасного): " bk_ip
+    if [ -n "$bk_ip" ]; then
+        valid_ip "$bk_ip" || die "Некорректный IP запасного"
+        read -rep "  Порт моста на запасном [Enter = $main_port]: " bk_port; bk_port="${bk_port:-$main_port}"
+    fi
+
+    mkdir -p /opt/bridge-ha
+    [ -f /opt/bridge-ha/haproxy.cfg ] && cp /opt/bridge-ha/haproxy.cfg "/opt/bridge-ha/haproxy.cfg.bak.$(date +%s)"
+    {
+        haproxy_head | sed 's|log /dev/log local0|log stdout format raw local0|'
+        echo "frontend bridge_in"
+        echo "    bind 127.0.0.1:10001"
+        echo "    default_backend bridges"
+        echo ""
+        echo "backend bridges"
+        echo "    option tcp-check"
+        echo "    server main ${main_ip}:${main_port} check inter 5s rise 2 fall 3"
+        [ -n "$bk_ip" ] && echo "    server backup ${bk_ip}:${bk_port} check inter 5s rise 2 fall 3 backup"
+        echo ""
+    } > /opt/bridge-ha/haproxy.cfg
+
+    cat > /opt/bridge-ha/docker-compose.yml << 'EOF'
+services:
+  bridge-ha:
+    image: haproxy:2.9-alpine
+    container_name: bridge-ha
+    restart: unless-stopped
+    network_mode: host
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+EOF
+
+    docker run --rm -v /opt/bridge-ha/haproxy.cfg:/c.cfg:ro haproxy:2.9-alpine haproxy -c -f /c.cfg >/dev/null 2>&1 \
+        || { docker run --rm -v /opt/bridge-ha/haproxy.cfg:/c.cfg:ro haproxy:2.9-alpine haproxy -c -f /c.cfg; die "Ошибка в конфиге bridge-ha"; }
+    (cd /opt/bridge-ha && docker compose up -d --force-recreate >/dev/null 2>&1) || die "bridge-ha не запустился"
+    sleep 2
+    ss -tlnp | grep -q '127.0.0.1:10001' && ok "bridge-ha слушает 127.0.0.1:10001" \
+        || warn "bridge-ha не слушает 10001 — docker logs bridge-ha"
+
+    report_probe "$main_ip" "$main_port" open "мост основного EXIT"
+    [ -n "$bk_ip" ] && report_probe "$bk_ip" "$bk_port" open "мост запасного EXIT"
+    echo "  На каждом EXIT открой мост для ЭТОЙ машины: этот скрипт → схема 2 → EXIT."
+
+    echo ""
+    echo '  Outbound в xray:'
+    echo '    { "tag": "VLESS_TO_EU", "protocol": "vless",'
+    echo '      "settings": { "vnext": [ { "address": "127.0.0.1", "port": 10001,'
+    echo '        "users": [ { "id": "<UUID техюзера>", "encryption": "none" } ] } ] },'
+    echo '      "streamSettings": { "network": "raw", "security": "none" } }'
+}
+
+# ══════════════════════════════════════════════════════════════════════
+#   EXIT (схема 2) — принимает мост от RELAY
+# ══════════════════════════════════════════════════════════════════════
+setup_exit_bridge() {
+    echo -e "\n${BLD}═══ EXIT (мост от RELAY) ═══${RST}\n"
+    echo "  На этой ноде нужен inbound VLESS на порту моста (security none)"
+    echo "  с техюзером в скваде."
+    echo ""
+    echo "  Адреса ЭТОЙ машины:"; show_ips; echo ""
+    echo "  IP всех RELAY, которые ходят на мост. Если relay ходит через mesh"
+    echo "  (NetBird) — укажи и его mesh-адрес: соединение придёт с него."
+    ask_ip_list "IP RELAY (через пробел)" RELAY_IPS
+    read -rep "  Порт моста [Enter = 9998]: " BR_PORT; BR_PORT="${BR_PORT:-9998}"
+    ask_panel
+    ask_ssh
+    confirm "мост :$BR_PORT для: $RELAY_IPS\nпанель $PANEL_IP\nSSH $SSH_PORT (${SSH_ALLOW:-Anywhere})"
+
+    apply_sysctl
+
+    info "Настраиваю ufw..."
+    ufw_base
+    local ip
+    for ip in $RELAY_IPS; do
+        ufw allow from "$ip" to any port "$BR_PORT" proto tcp comment 'bridge' >/dev/null
+        fix_vpsguard "$ip"
+    done
+    ufw allow from "$PANEL_IP" to any port 2222 proto tcp comment 'panel' >/dev/null
+    ufw_close_public "$BR_PORT" 2222
+    ufw_finish
+
+    pin_ip "$PANEL_IP" panel
+    for ip in $RELAY_IPS; do pin_ip "$ip" relay; done
+
+    echo ""
+    info "Состояние сервисов:"
+    check_listen "$BR_PORT" "мост VLESS"
+    check_listen 2222 "API ноды"
+
+    echo ""; hr
+    echo "  EXIT готова. В конфиге ноды:"
+    echo "   • inbound моста: port $BR_PORT, security none"
+    echo "   • Torrent Blocker: правила TB_* с inboundTag только для inbound с реальными IP,"
+    echo "     либо IP relay в ignoreLists.ip — плагин видит их, а не клиентов"
+    echo "   • Новый relay на мост — его IP сюда и в ignoreLists одновременно"
+    hr
+}
+
+# ══════════════════════════════════════════════════════════════════════
+#   Схема 3: gost-туннель (relay+mtls, mux v2) ENTRY → EXIT
+# ══════════════════════════════════════════════════════════════════════
+#  EXIT:  gost-tunnel@8443 слушает <вход EXIT>:8443, отдаёт потоки на
+#         127.0.0.1:443 (xray) и 127.0.0.1:80 (ACME). Публичные 443/80 закрыты.
+#  ENTRY: на каждую EXIT N процессов gost-<loc>@<порт> (= N TLS-сессий с mux)
+#         на 127.0.0.1:10x41..; haproxy раскладывает клиентов по ним
+#         (send-proxy-v2 идёт внутри туннеля). Несколько EXIT — выбор по SNI.
+
+setup_gost_exit() {
+    echo -e "\n${BLD}═══ EXIT (gost-сервер, туннель от ENTRY) ═══${RST}\n"
+    echo "  Remnanode + Caddy/nginx ставятся отдельно (vps-setup.sh → 10 → 1)."
+    echo "  xray должен слушать 443 на 0.0.0.0 или 127.0.0.1 — gost отдаёт туда."
+    echo ""
+    echo "  Адреса ЭТОЙ машины:"; show_ips; echo ""
+    echo "  На каком адресе ждать туннель (входной IP EXIT)."
+    ask_own_ip "Вход EXIT" TUN_IN
+    echo "  Исходящие IP всех ENTRY, которые будут подключаться (через пробел)."
+    echo "  Это адрес, с которого ENTRY ходит в EU (на двух-IP ENTRY — второй, «EU»)."
+    ask_ip_list "IP ENTRY" ENTRY_IPS
+    local old_pass="" pass
+    [ -f "$GOST_DIR/server.env" ] && old_pass=$(. "$GOST_DIR/server.env"; echo "${PASS:-}")
+    if [ -n "$old_pass" ]; then
+        read -rep "  Пароль туннеля [Enter = оставить текущий, new = новый]: " pass
+        case "$pass" in ""|keep) pass="$old_pass" ;; new) pass=$(openssl rand -hex 16) ;; esac
+    else
+        read -rep "  Пароль туннеля [Enter = сгенерировать]: " pass
+        [ -z "$pass" ] && pass=$(openssl rand -hex 16)
+    fi
+    [[ "$pass" =~ ^[A-Za-z0-9]+$ ]] || die "Пароль — только латиница и цифры (без PASS=, кавычек и т.п.)"
+    read -rep "  Лимит памяти gost [Enter = 3G]: " MEM; MEM="${MEM:-3G}"
+    ask_panel
+    ask_ssh
+    confirm "gost-сервер ${TUN_IN}:${TUN_PORT} для: $ENTRY_IPS\nMemoryMax $MEM, перезапуск ${RESTART_HOURS}:30 UTC\nпанель $PANEL_IP, SSH $SSH_PORT (${SSH_ALLOW:-Anywhere})"
+
+    install_gost
+    mkdir -p "$GOST_DIR"; chmod 700 "$GOST_DIR"
+    printf 'TUN_IN=%s\nPASS=%s\nENTRY_IPS="%s"\n' "$TUN_IN" "$pass" "$ENTRY_IPS" > "$GOST_DIR/server.env"
+    chmod 600 "$GOST_DIR/server.env"
+
+    # MemoryHigh не ставим: он душит gost до зависания. Только жёсткий MemoryMax.
+    cat > /etc/systemd/system/gost-tunnel@.service << EOF
+[Unit]
+Description=gost tunnel server (relay+mtls, mux v2) on port %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=$GOST_BIN -L "relay+mtls://tunnel:${pass}@${TUN_IN}:%i?${MUX}"
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+MemoryMax=$MEM
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 600 /etc/systemd/system/gost-tunnel@.service
+    systemctl daemon-reload
+    systemctl enable "gost-tunnel@${TUN_PORT}" >/dev/null 2>&1
+    systemctl restart "gost-tunnel@${TUN_PORT}"
+    drop_old_cron
+    install_restart_timer gost-restart 30 "gost-tunnel@*.service"
+
+    apply_sysctl
+    local ip
+    for ip in $ENTRY_IPS; do fix_vpsguard "$ip"; done
+
+    info "Настраиваю ufw..."
+    ufw_base
+    for ip in $ENTRY_IPS; do
+        ufw allow from "$ip" to any port "$TUN_PORT" proto tcp comment 'gost-entry' >/dev/null
+    done
+    ufw allow from "$PANEL_IP" to any port 2222 proto tcp comment 'panel' >/dev/null
+    ufw_close_public 443 80 2222 "$TUN_PORT"
+    ufw_finish
+
+    pin_ip "$PANEL_IP" panel
+    for ip in $ENTRY_IPS; do pin_ip "$ip" gost-entry; done
+
+    echo ""
+    info "Состояние сервисов:"
+    sleep 1
+    systemctl is-active --quiet "gost-tunnel@${TUN_PORT}" && ok "gost-tunnel@${TUN_PORT} работает" \
+        || warn "gost-tunnel@${TUN_PORT} не запустился: journalctl -u gost-tunnel@${TUN_PORT} -n 20"
+    check_listen "$TUN_PORT" "gost"
+    [ "$(tcp_probe 127.0.0.1 443)" = open ] && ok "127.0.0.1:443 — xray доступен gost'у" \
+        || warn "127.0.0.1:443 закрыт — xray слушает только внешний IP? Тогда туннель не заработает"
+    [ "$(tcp_probe 127.0.0.1 80)" = open ] && ok "127.0.0.1:80 — ACME доступен" \
+        || warn "127.0.0.1:80 закрыт — сертификат через туннель не выпустится"
+    check_listen 2222 "API ноды"
+
+    reality_footer EXIT "127.0.0.1 $ENTRY_IPS"
+    echo ""
+    echo -e "  ${BLD}Для ENTRY:${RST} вход ${TUN_IN}, пароль ${BLD}${pass}${RST}"
+    echo "  Пароль не пересылай в открытых чатах."
+    hr
+}
+
+# ── ENTRY gost: состояние хранится в $GOST_DIR/entry/<loc>.env ─────
+ENTRY_DIR="$GOST_DIR/entry"
+
+loc_list() {   # имена EXIT в порядке добавления (первая — backend по умолчанию)
+    local f
+    for f in "$ENTRY_DIR"/*.env; do
+        [ -f "$f" ] && echo "$(sed -n 's/^IDX=//p' "$f") $(basename "$f" .env)"
+    done | sort -n | awk '{print $2}'
+}
+
+loc_free_idx() {   # первый свободный номер 0..8
+    local i used
+    used=$(cat "$ENTRY_DIR"/*.env 2>/dev/null | sed -n 's/^IDX=//p')
+    for i in 0 1 2 3 4 5 6 7 8; do
+        echo "$used" | grep -qx "$i" || { echo "$i"; return; }
+    done
+    die "Больше 9 EXIT на одной ENTRY не поддерживается"
+}
+
+write_loc_units() {   # <loc> — юниты из env
+    local loc="$1"
+    # shellcheck disable=SC1090
+    . "$ENTRY_DIR/$loc.env"
+    local ifq=""; [ -n "$SRC" ] && ifq="&interface=$SRC"
+    local fwd="relay+mtls://tunnel:${PASS}@${EXIT}:${TUN_PORT}?${MUX}${ifq}"
+    cat > "/etc/systemd/system/gost-${loc}@.service" << EOF
+[Unit]
+Description=gost tunnel ${loc} → ${EXIT}, local port %i
+After=network-online.target
+Wants=network-online.target
+PartOf=gost-${loc}.target
+
+[Service]
+ExecStart=$GOST_BIN -L "tcp://127.0.0.1:%i/127.0.0.1:443" -F "${fwd}"
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+MemoryMax=${MEM}
+
+[Install]
+WantedBy=gost-${loc}.target
+EOF
+    cat > "/etc/systemd/system/gost-${loc}-acme.service" << EOF
+[Unit]
+Description=gost ACME tunnel ${loc} → ${EXIT}:80
+After=network-online.target
+Wants=network-online.target
+PartOf=gost-${loc}.target
+
+[Service]
+ExecStart=$GOST_BIN -L "tcp://127.0.0.1:${ACME}/127.0.0.1:80" -F "${fwd}"
+Restart=always
+RestartSec=3
+MemoryMax=64M
+
+[Install]
+WantedBy=gost-${loc}.target
+EOF
+    cat > "/etc/systemd/system/gost-${loc}.target" << EOF
+[Unit]
+Description=All gost tunnels to ${loc} (${EXIT})
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 600 "/etc/systemd/system/gost-${loc}@.service" "/etc/systemd/system/gost-${loc}-acme.service"
+    systemctl daemon-reload
+    # снять лишние экземпляры, если число сессий уменьшили
+    local u p
+    for u in $(systemctl list-units --plain --no-legend "gost-${loc}@*" 2>/dev/null | awk '{print $1}'); do
+        p=${u#gost-"${loc}"@}; p=${p%.service}
+        if [ "$p" -lt "$BASE" ] || [ "$p" -ge $((BASE + N)) ]; then
+            systemctl disable --now "$u" >/dev/null 2>&1
+        fi
+    done
+    systemctl enable "gost-${loc}.target" "gost-${loc}-acme.service" >/dev/null 2>&1
+    for ((p = BASE; p < BASE + N; p++)); do
+        systemctl enable "gost-${loc}@${p}" >/dev/null 2>&1
+        systemctl restart "gost-${loc}@${p}"
+    done
+    systemctl restart "gost-${loc}-acme"
+    systemctl start "gost-${loc}.target"
+}
+
+gen_entry_haproxy() {   # → путь к новому конфигу; учитывает все EXIT
+    local cfg loc first="" n hosts b
+    # shellcheck disable=SC1090
+    [ -f "$ENTRY_DIR/haproxy.opts" ] && . "$ENTRY_DIR/haproxy.opts"
+    b="${BIND_IP:-*}"
+    cfg=$(mktemp)
+    n=$(loc_list | wc -l)
+    {
+        haproxy_head
+        echo "frontend reality_in"
+        echo "    bind ${b}:443"
+        if [ -n "${OLD_SNI:-}" ] || [ "$n" -gt 1 ]; then
+            echo "    tcp-request inspect-delay 5s"
+            [ -n "${OLD_SNI:-}" ] && echo "    tcp-request content reject if { req.ssl_sni -i ${OLD_SNI} }"
+            echo "    tcp-request content accept if { req.ssl_hello_type 1 }"
+        fi
+        for loc in $(loc_list); do
+            # shellcheck disable=SC1090
+            ( . "$ENTRY_DIR/$loc.env"; echo "    use_backend exit_${loc} if { req.ssl_sni -i ${SNI} }" )
+            [ -z "$first" ] && first="$loc"
+        done
+        echo "    default_backend exit_${first}"
+        echo ""
+        for loc in $(loc_list); do
+            # shellcheck disable=SC1090
+            ( . "$ENTRY_DIR/$loc.env"
+              echo "backend exit_${loc}"
+              echo "    balance leastconn"
+              for ((p = BASE; p < BASE + N; p++)); do
+                  echo "    server t${p} 127.0.0.1:${p} send-proxy-v2"
+              done
+              echo "" )
+        done
+        echo "frontend http_in"
+        echo "    mode http"
+        echo "    bind ${b}:80"
+        echo "    option httplog"
+        echo "    timeout http-request 10s"
+        for loc in $(loc_list); do
+            # shellcheck disable=SC1090
+            ( . "$ENTRY_DIR/$loc.env"; echo "    use_backend acme_${loc} if { hdr(host),field(1,:) -i ${SNI} }" )
+        done
+        echo "    default_backend acme_${first}"
+        echo ""
+        for loc in $(loc_list); do
+            # shellcheck disable=SC1090
+            ( . "$ENTRY_DIR/$loc.env"
+              hosts=""; [ "$ACME_PP" = 1 ] && hosts=" send-proxy-v2"
+              echo "backend acme_${loc}"
+              echo "    mode http"
+              echo "    server a 127.0.0.1:${ACME}${hosts}"
+              echo "" )
+        done
+    } > "$cfg"
+    echo "$cfg"
+}
+
+add_gost_exit() {
+    echo ""
+    echo -e "  ${BLD}Новая EXIT${RST}"
+    local loc idx sni ex pass n src mem acme_pp a
+    while true; do
+        read -rep "  Короткое имя (латиница/цифры, напр. nl, de, fr): " loc
+        [[ "$loc" =~ ^[a-z0-9]{1,10}$ ]] || { warn "Только a-z и 0-9"; continue; }
+        if [ -f "$ENTRY_DIR/$loc.env" ]; then
+            read -rep "  $loc уже есть — перезаписать? [y/N]: " a
+            [[ "${a,,}" == y* ]] || continue
+            idx=$(sed -n 's/^IDX=//p' "$ENTRY_DIR/$loc.env")
+        fi
+        break
+    done
+    [ -z "${idx:-}" ] && idx=$(loc_free_idx)
+    echo "  Selfsteal-домен(ы) этой EXIT — по ним haproxy выбирает, куда слать."
+    echo "  DNS этих доменов → клиентский IP ENTRY. Несколько — через пробел."
+    while true; do read -rep "  SNI: " sni; [ -n "$sni" ] && break; done
+    ask_ip "Вход EXIT (gost-сервер)" ex
+    while true; do
+        read -rep "  Пароль туннеля (как показал EXIT): " pass
+        [[ "$pass" =~ ^[A-Za-z0-9]+$ ]] && break
+        warn "Только сам пароль: латиница и цифры, без PASS= и кавычек"
+    done
+    read -rep "  Сколько сессий (TLS-соединений) [Enter = 24]: " n; n="${n:-24}"
+    [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le 64 ] || die "Сессий — от 1 до 64"
+    echo "  Исходящий IP к этой EXIT (если у ENTRY отдельный «EU»-адрес). Enter — по маршруту."
+    ask_own_ip "IP источника" src 1
+    read -rep "  Лимит памяти на сессию [Enter = 128M; на 1 ГБ RAM — 64M]: " mem; mem="${mem:-128M}"
+    echo "  Selfsteal на EXIT: nginx (ждёт PROXY v2 на 80) или Caddy (без него)?"
+    read -rep "  nginx на EXIT? [y/N]: " a; acme_pp=0; [[ "${a,,}" == y* ]] && acme_pp=1
+
+    local base=$((10441 + idx * 100)) acme=$((10080 + idx))
+    confirm "EXIT $loc: ${ex}:${TUN_PORT}, SNI: $sni\n$n сессий → 127.0.0.1:${base}..$((base + n - 1)), ACME 127.0.0.1:${acme}\nисточник: ${src:-по маршруту}, MemoryMax $mem на сессию"
+
+    mkdir -p "$ENTRY_DIR"; chmod 700 "$GOST_DIR" "$ENTRY_DIR"
+    cat > "$ENTRY_DIR/$loc.env" << EOF
+IDX=$idx
+EXIT=$ex
+PASS=$pass
+SNI="$sni"
+N=$n
+BASE=$base
+ACME=$acme
+SRC=$src
+MEM=$mem
+ACME_PP=$acme_pp
+EOF
+    chmod 600 "$ENTRY_DIR/$loc.env"
+
+    [ -n "$src" ] && setup_src_route "$src"
+    info "Проверяю связь с $ex:${TUN_PORT}..."
+    if [ -n "$src" ]; then
+        ip route get "$ex" from "$src" 2>/dev/null | head -1 | sed 's/^/       /'
+    fi
+    report_probe "$ex" "$TUN_PORT" open "gost на EXIT, с ${src:-основного IP}" "$src"
+    write_loc_units "$loc"
+    ok "Туннели $loc: $n сессий + ACME"
+}
+
+remove_gost_exit() {
+    local loc
+    echo "  EXIT на этой ENTRY: $(loc_list | xargs)"
+    read -rep "  Какую удалить: " loc
+    [ -f "$ENTRY_DIR/$loc.env" ] || die "Нет такой: $loc"
+    systemctl disable --now "gost-${loc}.target" "gost-${loc}-acme.service" >/dev/null 2>&1
+    local u
+    for u in $(systemctl list-units --plain --no-legend --all "gost-${loc}@*" 2>/dev/null | awk '{print $1}'); do
+        systemctl disable --now "$u" >/dev/null 2>&1
+    done
+    rm -f "/etc/systemd/system/gost-${loc}@.service" "/etc/systemd/system/gost-${loc}-acme.service" \
+          "/etc/systemd/system/gost-${loc}.target"
+    rm -rf "/etc/systemd/system/gost-${loc}.target.wants"
+    rm -f "$ENTRY_DIR/$loc.env"
+    systemctl daemon-reload
+    ok "EXIT $loc удалена"
+    if [ -n "$(loc_list)" ]; then
+        local cfg; cfg=$(gen_entry_haproxy); haproxy_apply "$cfg" "*"; rm -f "$cfg"
+    else
+        warn "EXIT не осталось — haproxy не трогаю"
+    fi
+}
+
+setup_gost_entry() {
+    echo -e "\n${BLD}═══ ENTRY (haproxy + gost-туннели) ═══${RST}\n"
+    echo "  Адреса ЭТОЙ машины:"; show_ips; echo ""
+    local have; have=$(loc_list | xargs)
+    [ -n "$have" ] && echo "  Уже настроены EXIT: $have" && echo ""
+
+    # shellcheck disable=SC1090
+    [ -f "$ENTRY_DIR/haproxy.opts" ] && . "$ENTRY_DIR/haproxy.opts"
+    echo "  Адрес для клиентов (на нём haproxy слушает 443/80)."
+    echo "  Если у машины два IP — клиентский здесь, EU-адрес укажешь у каждой EXIT."
+    local cur="${BIND_IP:-}" nb
+    if [ -n "$cur" ]; then
+        ask_own_ip "Клиентский IP [Enter = оставить $cur]" nb 1
+        BIND_IP="${nb:-$cur}"
+    else
+        ask_own_ip "Клиентский IP [Enter = все адреса]" BIND_IP 1
+    fi
+    echo "  Старые SNI, которые отбивать (через пробел, Enter — нет)."
+    read -rep "  Отбивать SNI${OLD_SNI:+ [сейчас: $OLD_SNI, '-' — убрать]}: " a
+    case "$a" in "") ;; -) OLD_SNI="" ;; *) OLD_SNI="$a" ;; esac
+    ask_ssh
+
+    install_haproxy
+    install_gost
+    mkdir -p "$ENTRY_DIR"; chmod 700 "$GOST_DIR" "$ENTRY_DIR"
+    printf 'BIND_IP=%s\nOLD_SNI="%s"\n' "$BIND_IP" "${OLD_SNI:-}" > "$ENTRY_DIR/haproxy.opts"
+
+    while true; do
+        if [ -n "$(loc_list)" ]; then
+            read -rep "  Добавить/изменить EXIT? [y/N]: " a
+            [[ "${a,,}" == y* ]] || break
+        fi
+        add_gost_exit
+    done
+
+    apply_sysctl
+    drop_old_cron
+    install_restart_timer gost-restart 33 "gost-*@*.service gost-*-acme.service"
+    install_tun_check
+
+    local cfg; cfg=$(gen_entry_haproxy)
+    haproxy_apply "$cfg" "${BIND_IP:-*}"; rm -f "$cfg"
+
+    info "Настраиваю ufw..."
+    ufw_base
+    ufw allow 443/tcp >/dev/null
+    ufw allow 80/tcp  >/dev/null
+    ufw_close_public 2222 9998 "$TUN_PORT"
+    ufw_finish
+
+    echo ""
+    sleep 3
+    /usr/local/bin/tun-check 2>/dev/null | head -20
+    entry_footer "${BIND_IP:-$(pub_ip)}"
+    echo "   • Состояние туннелей в любой момент: tun-check"
+}
+
+# ── tun-check: сводка по туннелям и обрывам ─────────────────────────
+install_tun_check() {
+    cat > /usr/local/bin/tun-check << 'EOF'
+#!/bin/bash
+# Сводка gost-туннелей ENTRY и обрывов haproxy за период (по умолчанию 1 час)
+SINCE="${1:-1 hour ago}"
+for f in /etc/gost/entry/*.env; do
+    [ -f "$f" ] || continue
+    loc=$(basename "$f" .env); . "$f"
+    act=0; for ((p = BASE; p < BASE + N; p++)); do systemctl is-active --quiet "gost-${loc}@${p}" && act=$((act + 1)); done
+    est=$(ss -tn state established "( dport = :8443 )" dst "$EXIT" 2>/dev/null | tail -n +2 | wc -l)
+    acme=$(systemctl is-active "gost-${loc}-acme" 2>/dev/null)
+    mem=$(systemctl show "gost-${loc}@${BASE}" -p MemoryCurrent --value 2>/dev/null)
+    [[ "$mem" =~ ^[0-9]+$ ]] && mem="$((mem / 1048576))M" || mem="-"
+    printf "  %-5s %-16s сессий %2d/%-2d  TLS до EXIT %2d  acme %-8s  память(1 сессия) %s\n" \
+        "$loc" "$EXIT" "$act" "$N" "$est" "$acme" "$mem"
+done
+echo ""
+echo "  Обрывы haproxy с: $SINCE  (SD — плохо; sD/cD — простой, норма)"
+journalctl -u haproxy --since "$SINCE" --no-pager -o cat 2>/dev/null | awk '
+    { be=""; fl="";
+      for (i = 1; i <= NF; i++) {
+          if ($i ~ /^(exit|acme|next)_?[a-z0-9]*\//) { split($i, a, "/"); be = a[1] }
+          if (be != "" && fl == "" && $i ~ /^[-A-Za-z][-A-Za-z]$/ && i > 3) fl = $i
+      }
+      if (be != "" && fl != "") c[be" "fl]++ }
+    END { for (k in c) print c[k], k }' | sort -k2,2 -k1,1nr | awk '{printf "    %-14s %-3s %d\n", $2, $3, $1}'
+EOF
+    chmod 755 /usr/local/bin/tun-check
+}
+
+# ══════════════════════════════════════════════════════════════════════
+#   Меню
+# ══════════════════════════════════════════════════════════════════════
+pick_role() {   # <заголовок> <варианты...> → ROLE (номер)
+    local title="$1"; shift
+    echo ""; echo -e "  ${BLD}$title${RST}"; echo "  Какая это машина / что сделать?"; echo ""
+    local i=1 o; for o in "$@"; do echo "  $i) $o"; i=$((i+1)); done
+    echo ""; echo "  0) Назад"; echo ""
+    read -rep "  Выбор: " ROLE
+}
+
+echo ""
+echo -e "${BLD}╔══════════════════════════════════════════════════════════════╗${RST}"
+echo -e "${BLD}║   haproxy-цепочка: входная нода + Reality за ней             ║${RST}"
+echo -e "${BLD}╚══════════════════════════════════════════════════════════════╝${RST}"
+echo ""
+echo "  1) ENTRY → EXIT напрямую"
+echo "     клиент → haproxy → Reality на EU → интернет"
+echo ""
+echo "  2) ENTRY → RELAY → EXIT"
+echo "     клиент → haproxy → Reality на relay (ру-трафик выходит тут) → мост → EU"
+echo ""
+echo "  3) ENTRY → EXIT через gost-туннель (mux поверх mTLS)"
+echo "     адрес EXIT не светится клиентским трафиком; одна ENTRY — несколько EXIT по SNI"
+echo ""
+echo "  4) Служебное"
+echo ""
+echo "  0) Выход"
+echo ""
+read -rep "  Выбор: " CH
+case "$CH" in
+    1)
+        pick_role "Схема 1: ENTRY → EXIT" \
+            "EXIT  — Reality за haproxy (настраивать первой)" \
+            "ENTRY — haproxy, сюда подключаются клиенты"
+        case "$ROLE" in
+            1) setup_reality_node 1 ;;
+            2) setup_entry 1 ;;
+        esac ;;
+    2)
+        pick_role "Схема 2: ENTRY → RELAY → EXIT" \
+            "EXIT  — принимает мост от RELAY (настраивать первой)" \
+            "RELAY — Reality за haproxy + bridge-ha на EXIT" \
+            "ENTRY — haproxy, сюда подключаются клиенты"
+        case "$ROLE" in
+            1) setup_exit_bridge ;;
+            2) setup_reality_node 2 ;;
+            3) setup_entry 2 ;;
+        esac ;;
+    3)
+        pick_role "Схема 3: ENTRY → gost → EXIT" \
+            "EXIT  — gost-сервер (настраивать первой, выдаст пароль)" \
+            "ENTRY — haproxy + туннели (добавить / изменить EXIT)"
+        case "$ROLE" in
+            1) setup_gost_exit ;;
+            2) setup_gost_entry ;;
+        esac ;;
+    4)
+        pick_role "Служебное" \
+            "bridge-ha на RELAY (поменять / добавить EXIT)" \
+            "Лимиты ядра (sysctl)" \
+            "Закрепить IP выше блоклистов (панель, сосед)" \
+            "Состояние gost-туннелей (tun-check)" \
+            "Удалить EXIT с gost-ENTRY" \
+            "Source-routing для второго IP"
+        case "$ROLE" in
+            1) setup_bridge_ha ;;
+            2) apply_sysctl ;;
+            3) ask_ip "IP" PIN; read -rep "  Комментарий: " c; pin_ip "$PIN" "${c:-manual}" ;;
+            4) [ -x /usr/local/bin/tun-check ] || install_tun_check; /usr/local/bin/tun-check ;;
+            5) remove_gost_exit ;;
+            6) ask_own_ip "Второй IP этой машины" SRCIP; setup_src_route "$SRCIP" ;;
+        esac ;;
+    *) exit 0 ;;
+esac
+VPS_SETUP_HAPROXY_PAIR
+)
+}
+
 setup_remnanode() {
   while true; do
     print_header
@@ -5709,9 +6887,10 @@ setup_remnanode() {
     echo "     бан торрентщиков на BS + журнал банов/разбанов"
     echo ""
     echo "  6) Сменить домен SelfSteal (Caddy / Nginx)"
+    echo "  7) HAProxy Pair — настройка ENTRY / RELAY / EXIT"
     echo "  0) Назад"
     echo ""
-    read -e -p "Выберите [0-6]: " RN_METHOD
+    read -e -p "Выберите [0-7]: " RN_METHOD
 
     case $RN_METHOD in
         1) setup_remnanode_builtin ;;
@@ -5720,12 +6899,13 @@ setup_remnanode() {
         4) setup_node_config ;;
         5) setup_tbsync ;;
         6) rn_change_selfsteal_domain ;;
+        7) rn_haproxy_pair ;;
         0) return ;;
         *) echo "Неверный выбор." ;;
     esac
 
     # методы 1-3 завершаются сами; после них возврат в это подменю
-    [[ "$RN_METHOD" =~ ^[1236]$ ]] && { echo ""; read -e -p "Нажмите Enter для возврата..."; }
+    [[ "$RN_METHOD" =~ ^[12367]$ ]] && { echo ""; read -e -p "Нажмите Enter для возврата..."; }
   done
 }
 
@@ -6352,11 +7532,31 @@ def cmd_relay_dump():
         print(f"{ip} {int(ex) if isinstance(ex, (int, float)) else 0}")
 
 
-def cmd_bs_apply(ttl):
+def cmd_bs_apply(ttl, src="default"):
+    # Несколько relay могут слать списки на одну BS: каждый источник хранит свой
+    # текущий список, а в nft-сете держится ОБЪЕДИНЕНИЕ. Источник, который молчит
+    # дольше 4*ttl, считается отключённым и его баны снимаются.
     cur = read_input()
     have = set_elems("inet", "tbsync", "banned")
     if have is None:
         sys.exit(2)
+    src = "".join(ch for ch in src if ch.isalnum() or ch in ".-_") or "default"
+    now = time.time()
+    with open(os.path.join(STATE_DIR, f"src-{src}.json"), "w") as f:
+        json.dump(sorted(cur), f)
+    union = {}
+    for fn in os.listdir(STATE_DIR):
+        if not (fn.startswith("src-") and fn.endswith(".json")):
+            continue
+        fp = os.path.join(STATE_DIR, fn)
+        if now - os.path.getmtime(fp) > 4 * ttl:
+            continue
+        try:
+            for ip in json.load(open(fp)):
+                union[ip] = cur.get(ip, 0)
+        except Exception:
+            pass
+    union.update(cur)
     batch = []
     if cur:
         ips = ", ".join(cur)
@@ -6365,7 +7565,7 @@ def cmd_bs_apply(ttl):
         batch.append(f"delete element inet tbsync banned {{ {ips} }}")
         batch.append("add element inet tbsync banned { "
                      + ", ".join(f"{ip} timeout {ttl}s" for ip in cur) + " }")
-    stale = [ip for ip in have if ip not in cur]
+    stale = [ip for ip in have if ip not in union]
     if stale:
         batch.append("delete element inet tbsync banned { " + ", ".join(stale) + " }")
     if batch:
@@ -6374,7 +7574,7 @@ def cmd_bs_apply(ttl):
         if r.returncode != 0:
             sys.stderr.write(r.stderr)
             sys.exit(1)
-    track("bs", cur)
+    track("bs", union)
 
 
 def cmd_unban(ip):
@@ -6432,7 +7632,8 @@ def main():
     elif c == "track":
         track(sys.argv[2], read_input())
     elif c == "bs-apply":
-        cmd_bs_apply(int(sys.argv[2]) if len(sys.argv) > 2 else 120)
+        cmd_bs_apply(int(sys.argv[2]) if len(sys.argv) > 2 else 120,
+                     sys.argv[3] if len(sys.argv) > 3 else "default")
     elif c == "unban":
         cmd_unban(sys.argv[2])
     elif c == "show":
@@ -6531,7 +7732,7 @@ printf '%s\n' "$CUR" | python3 "$T" track relay
 rc=0
 for BS in $BS_IPS; do
   printf '%s\n' "$CUR" | ssh -T -i /root/.ssh/tbsync -p "$SSH_PORT" \
-      -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new \
+      -o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=3 -o StrictHostKeyChecking=accept-new \
       "root@$BS" 2>/dev/null || { logger -t tbsync "push to $BS failed"; rc=1; }
 done
 exit $rc
@@ -6579,7 +7780,7 @@ EOF
     local b fail=0
     for b in $bs_ips; do
         if python3 "$TBS_TOOL" relay-dump 2>/dev/null | ssh -T -i "$TBS_KEY" -p "$ssh_port" \
-             -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "root@$b" 2>/dev/null; then
+             -o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=3 -o StrictHostKeyChecking=accept-new "root@$b" 2>/dev/null; then
             rn_success "BS $b — синхронизация работает"
         else
             rn_warn "BS $b — нет связи. Проверь: установку на BS, ufw ($ssh_port с этой relay), fleet_v4 в vpsguard"
@@ -6709,7 +7910,7 @@ EOF
     cat > /usr/local/bin/tbsync-recv << 'EOF'
 #!/bin/bash
 . /etc/tbsync.conf
-exec python3 /usr/local/lib/tbsync/tbsync.py bs-apply "${BAN_TTL:-120}"
+exec python3 /usr/local/lib/tbsync/tbsync.py bs-apply "${BAN_TTL:-120}" "${1:-default}"
 EOF
     chmod +x /usr/local/bin/tbsync-recv
 
@@ -6717,7 +7918,7 @@ EOF
     touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
     local body; body=$(echo "$pubkey" | awk '{print $2}')
     sed -i "\#${body}#d" /root/.ssh/authorized_keys
-    echo "command=\"/usr/local/bin/tbsync-recv\",restrict $pubkey" >> /root/.ssh/authorized_keys
+    echo "command=\"/usr/local/bin/tbsync-recv $relay_ip\",restrict $pubkey" >> /root/.ssh/authorized_keys
     rn_success "Ключ relay добавлен (может только передавать список IP)"
 
     if command -v ufw >/dev/null 2>&1; then
